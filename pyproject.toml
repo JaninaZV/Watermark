@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "watermark-meter"
+version = "0.1.0"
+description = "Workload-level energy, carbon, and water meter for AI and compute workloads."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "psutil",
+]
+
+[project.optional-dependencies]
+gpu = ["pynvml"]
+dev = ["pytest"]
+
+[project.scripts]
+watermark = "watermark_meter:main"
+
+[tool.setuptools]
+py-modules = ["watermark_meter"]
+packages = ["dashboard"]
+
+[tool.setuptools.package-data]
+dashboard = ["dashboard_template.html", "portfolio_template.html"]

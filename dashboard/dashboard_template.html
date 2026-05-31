@@ -1,0 +1,2268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Watermark — Workload Footprint · va-100sdxl-001</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0a0d12;
+      --panel: #11161d;
+      --panel-2: #161c24;
+      --border: #1f2630;
+      --border-2: #2a3340;
+      --text: #e6edf3;
+      --muted: #7d8590;
+      --muted-2: #525d6b;
+      --accent: #4fd1c5;
+      --accent-dim: #2ea399;
+      --measured: #58a6ff;
+      --modeled: #d29922;
+      --warn: #f85149;
+      --success: #3fb950;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+      font-size: 14.5px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      min-height: 100%;
+    }
+    .mono { font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace; }
+    .accent { color: var(--accent); }
+    .muted { color: var(--muted); }
+
+    /* ============================================================
+       APP STRUCTURE
+       ============================================================ */
+    .app {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      min-height: 100vh;
+    }
+
+    /* ============================================================
+       HEADER — two rows: primary nav + status strip
+       ============================================================ */
+    header.topbar {
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .topbar-main {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      padding: 12px 28px;
+      gap: 20px;
+      min-height: 56px;
+    }
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .brand-home {
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+    }
+    .brand-home:hover .brand-mark { color: var(--accent-dim); }
+    .header-subtitle {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.35;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+      margin: 0;
+      text-align: center;
+    }
+    .brand { font-size: 22px; letter-spacing: 3px; font-weight: 600; }
+    .brand-mark { color: var(--accent); }
+    .version-pill {
+      font-size: 10px;
+      letter-spacing: 1.2px;
+      text-transform: uppercase;
+      color: var(--muted);
+      border: 1px solid var(--border-2);
+      padding: 3px 8px;
+      border-radius: 3px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .action-btn {
+      background: transparent;
+      border: 1px solid var(--border-2);
+      color: var(--text);
+      padding: 7px 14px;
+      font-size: 12.5px;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: background 120ms ease, border-color 120ms ease;
+      font-family: inherit;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-width: 110px;
+      text-align: center;
+      text-decoration: none;
+      box-sizing: border-box;
+    }
+    .action-btn:hover { background: var(--panel-2); border-color: var(--accent-dim); }
+    .action-btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 600; }
+    .action-btn.primary:hover { background: var(--accent-dim); border-color: var(--accent-dim); }
+
+    /* Status strip — below main nav */
+    .topbar-status {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 28px;
+      min-height: 36px;
+      border-top: 1px solid var(--border);
+      background: var(--bg);
+      font-size: 11.5px;
+      color: var(--muted);
+    }
+    .status-left, .status-right {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+    .status-item { display: flex; align-items: center; gap: 6px; }
+    .status-item .key { font-size: 9.5px; text-transform: uppercase; letter-spacing: 1.1px; color: var(--muted-2); }
+    .status-item .val { color: var(--text); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+    .status-item .val#hdrUtc { cursor: pointer; }
+    .status-item .val#hdrUtc:hover { color: var(--accent); }
+    .dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      display: inline-block;
+    }
+    .dot.live { background: var(--success); box-shadow: 0 0 8px rgba(63, 185, 80, 0.55); }
+    .dot.measured { background: var(--measured); }
+    .dot.modeled { background: var(--modeled); }
+    .sep { color: var(--border-2); }
+
+    /* ============================================================
+       MAIN LAYOUT
+       ============================================================ */
+    .main {
+      display: grid;
+      grid-template-columns: 1fr 400px;
+      min-height: calc(100vh - 110px);
+    }
+    .content {
+      padding: 22px;
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+      align-content: start;
+    }
+    .sidebar {
+      border-left: 1px solid var(--border);
+      background: var(--panel);
+      padding: 22px;
+    }
+
+    /* ============================================================
+       PANELS
+       ============================================================ */
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 18px 20px;
+    }
+    .panel-title {
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 1.7px;
+      color: var(--muted);
+      margin-bottom: 16px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* ============================================================
+       KPI OVERVIEW — toggle + 5 cards across, full width
+       ============================================================ */
+    .kpi-overview {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .kpi-strip {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      width: 100%;
+      min-width: 0;
+    }
+    .kpi {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 18px 20px;
+      position: relative;
+      overflow: visible;
+      min-width: 0;
+    }
+    .kpi::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 16px; bottom: 16px;
+      width: 3px;
+      background: var(--accent);
+      opacity: 0.55;
+      border-radius: 0 2px 2px 0;
+    }
+    .kpi.cost::before { background: var(--measured); opacity: 0.65; }
+    .kpi .label {
+      color: var(--muted);
+      font-size: 10.5px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 12px;
+      font-weight: 600;
+    }
+    .kpi-label-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .kpi-label-row .label {
+      margin-bottom: 0;
+    }
+    .kpi-info-btn {
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      background: transparent;
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .kpi-info-btn:hover,
+    .kpi-info-btn[aria-expanded="true"] {
+      color: var(--accent);
+      border-color: var(--accent);
+      background: rgba(79, 209, 197, 0.08);
+    }
+    .kpi-derivation {
+      margin: -4px 0 12px;
+      padding: 10px 12px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--accent);
+      border-radius: 4px;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .kpi-derivation[hidden] { display: none; }
+    .kpi-derivation .derivation-title {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--accent);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+    .kpi-derivation .derivation-formula {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px;
+      color: var(--text);
+      white-space: pre-line;
+      margin-bottom: 6px;
+    }
+    .kpi-derivation .derivation-source {
+      font-size: 9.5px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .kpi .value-wrap {
+      position: relative;
+      display: block;
+      width: 100%;
+      min-width: 0;
+    }
+    .kpi .value {
+      font-size: 32px;
+      font-weight: 500;
+      line-height: 1;
+      letter-spacing: -0.5px;
+      margin-bottom: 10px;
+      display: inline-block;
+    }
+    .kpi .value.measured { border-bottom-color: rgba(88, 166, 255, 0.4); }
+    .kpi .unit {
+      color: var(--muted);
+      font-size: 14px;
+      margin-left: 3px;
+      font-weight: 400;
+    }
+    .kpi .anchor {
+      color: var(--text);
+      font-size: 11.5px;
+      margin-bottom: 4px;
+      opacity: 0.85;
+    }
+    .kpi .benchmark {
+      color: var(--muted);
+      font-size: 10.5px;
+      line-height: 1.4;
+    }
+    .kpi-view-toggle {
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+      flex-wrap: nowrap;
+      gap: 12px;
+      width: 100%;
+      min-width: 0;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .kpi-view-toggle > span {
+      flex-shrink: 0;
+      white-space: nowrap;
+      letter-spacing: 0.3px;
+    }
+    .kpi-view-toggle-buttons {
+      display: inline-flex;
+      flex-wrap: nowrap;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .kpi-view-toggle button {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      padding: 5px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 10.5px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .kpi-view-toggle button.active {
+      color: var(--text);
+      border-color: var(--accent);
+      background: rgba(79, 209, 197, 0.08);
+    }
+    .kpi-view-toggle button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .kpi-row-label .tag {
+      margin-left: 0;
+      vertical-align: middle;
+    }
+    .kpi-rows {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 10px;
+      width: 100%;
+      min-width: 0;
+    }
+    .kpi-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      width: 100%;
+      min-width: 0;
+    }
+    .kpi-row-label {
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      font-weight: 600;
+      flex: 1 1 auto;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 3px;
+      line-height: 1.2;
+    }
+    .kpi-row .value {
+      font-size: 16px;
+      margin-bottom: 0;
+      border-bottom: none;
+      cursor: default;
+      flex: 0 0 auto;
+      white-space: nowrap;
+      text-align: right;
+      max-width: 45%;
+    }
+    .kpi-row.lifecycle {
+      margin-top: 2px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      align-items: baseline;
+    }
+    .kpi-row.lifecycle .kpi-row-label { color: var(--accent); }
+    .kpi-row.lifecycle .value {
+      font-size: 20px;
+      font-weight: 600;
+      max-width: none;
+    }
+    .scope-list .why.modeled { color: var(--accent); }
+
+    /* Scale & Context comparison cards */
+    .scale-context {
+      grid-column: span 12;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 18px 20px;
+    }
+    .scale-context .panel-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+    .scale-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    @media (max-width: 1100px) {
+      .scale-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 700px) {
+      .scale-grid { grid-template-columns: 1fr; }
+    }
+    .scale-card {
+      position: relative;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 14px 14px 12px;
+      min-height: 88px;
+    }
+    .scale-card:hover {
+      border-color: var(--accent);
+    }
+    .scale-card .scale-headline {
+      color: var(--text);
+      font-size: 12.5px;
+      line-height: 1.45;
+      margin-bottom: 8px;
+    }
+    .scale-card .scale-footnote {
+      color: var(--muted-2);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+    .scale-card .method-tip {
+      width: 260px;
+    }
+    .scale-caveat {
+      margin-top: 14px;
+      font-size: 10.5px;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    /* Methodology tooltip — scale cards only (KPI cards use info button) */
+    .method-tip {
+      position: absolute;
+      bottom: calc(100% + 10px);
+      left: 0;
+      background: var(--bg);
+      border: 1px solid var(--accent);
+      border-radius: 4px;
+      padding: 12px 14px;
+      width: 290px;
+      max-width: calc(100vw - 48px);
+      font-size: 11px;
+      color: var(--text);
+      box-shadow: 0 14px 36px rgba(0,0,0,0.6), 0 0 0 1px rgba(79, 209, 197, 0.15);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 180ms ease, transform 180ms ease;
+      transform: translateY(4px);
+      z-index: 100;
+    }
+    .method-tip::before {
+      content: '';
+      position: absolute;
+      top: 100%;
+      left: 16px;
+      border: 6px solid transparent;
+      border-top-color: var(--accent);
+    }
+    .scale-card:hover .method-tip {
+      opacity: 1;
+      transform: translateY(0);
+      pointer-events: auto;
+    }
+    .method-tip .tip-label {
+      font-size: 9px;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--accent);
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+    .method-tip .tip-formula {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--text);
+      line-height: 1.55;
+      margin-bottom: 8px;
+      white-space: pre-line;
+    }
+    .method-tip .tip-source {
+      font-size: 9.5px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      border-top: 1px solid var(--border);
+      padding-top: 7px;
+      line-height: 1.45;
+    }
+
+    /* ============================================================
+       CHART PANELS
+       ============================================================ */
+    .chart-large { grid-column: span 8; }
+    .chart-small { grid-column: span 4; }
+    .chart-full { grid-column: span 12; }
+    .chart-body { position: relative; height: 240px; }
+    .chart-body.tall { height: 280px; }
+    .chart-body.short { height: 180px; }
+
+    /* Hover-to-grow on chart panels */
+    .chart-large, .chart-small, .chart-full {
+      transition: transform 240ms cubic-bezier(0.2, 0.8, 0.4, 1),
+                  box-shadow 240ms ease,
+                  border-color 240ms ease;
+      cursor: zoom-in;
+      transform-origin: center center;
+      will-change: transform;
+    }
+    .chart-large:hover, .chart-small:hover, .chart-full:hover {
+      transform: scale(1.03);
+      box-shadow: 0 14px 48px rgba(79, 209, 197, 0.18),
+                  0 6px 16px rgba(0, 0, 0, 0.5);
+      border-color: rgba(79, 209, 197, 0.45);
+      z-index: 5;
+      position: relative;
+    }
+    .chart-full.no-zoom, .chart-full.no-zoom:hover {
+      transform: none;
+      cursor: default;
+      box-shadow: none;
+      border-color: var(--border);
+    }
+
+    /* ============================================================
+       REGIONAL COMPARISON
+       ============================================================ */
+    .region { grid-column: span 4; }
+    .regional-grid {
+      grid-column: span 12;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+    .regional-grid .region { grid-column: auto; }
+    .region.cleanest {
+      border-color: rgba(79, 209, 197, 0.35);
+      background: linear-gradient(180deg, rgba(79, 209, 197, 0.04) 0%, var(--panel) 60%);
+    }
+    .region-name { font-size: 11px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--muted); font-weight: 600; }
+    .region-label {
+      font-size: 17px; margin: 4px 0 16px; font-weight: 500;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .region-tag {
+      font-size: 9.5px; letter-spacing: 1.3px; color: var(--accent);
+      background: rgba(79, 209, 197, 0.12); padding: 3px 8px;
+      border-radius: 2px; font-weight: 600;
+    }
+    .region-tag.scenario {
+      color: var(--modeled);
+      background: rgba(210, 153, 34, 0.12);
+    }
+    .region-tag.run-region {
+      color: var(--measured);
+      background: rgba(88, 166, 255, 0.12);
+    }
+    .region-tag.stress {
+      color: #e6a23c;
+      background: rgba(230, 162, 60, 0.12);
+      margin-left: 4px;
+      font-size: 9.5px;
+    }
+
+    /* ============================================================
+       RUN COMPARISON (two measured runs)
+       ============================================================ */
+    .run-comparison { margin-bottom: 16px; }
+    .compare-region-banner {
+      margin: 0 0 16px;
+      padding: 12px 14px;
+      border-radius: 4px;
+      border: 1px solid rgba(210, 153, 34, 0.35);
+      background: rgba(210, 153, 34, 0.08);
+      color: var(--text);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+    .compare-columns-header {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 10px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.1px;
+      color: var(--muted);
+    }
+    .compare-col-label {
+      font-size: 13px;
+      text-transform: none;
+      letter-spacing: 0;
+      color: var(--text);
+      font-weight: 500;
+      line-height: 1.35;
+    }
+    .compare-col-label .region-tag {
+      display: inline-block;
+      margin-top: 4px;
+    }
+    .compare-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .compare-row {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1fr;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--panel-2);
+    }
+    .compare-metric-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+    .compare-value {
+      font-family: var(--mono);
+      font-size: 15px;
+      font-weight: 500;
+    }
+    .compare-delta {
+      font-family: var(--mono);
+      font-size: 12px;
+      margin-top: 3px;
+    }
+    .compare-delta.delta-good { color: var(--accent); }
+    .compare-delta.delta-bad { color: #f85149; }
+    .compare-delta.delta-neutral { color: var(--muted-2); }
+    .compare-caveat {
+      margin-top: 14px;
+      font-size: 11px;
+      color: var(--muted-2);
+      line-height: 1.45;
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+    }
+    .region-tag.stress.extreme {
+      color: #f85149;
+      background: rgba(248, 81, 73, 0.12);
+    }
+    .region.run-region {
+      border-color: rgba(88, 166, 255, 0.35);
+    }
+    .region.scenario {
+      opacity: 0.92;
+    }
+    .regional-intro {
+      grid-column: span 12;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 16px 20px;
+    }
+    .regional-intro .headline {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .region-context {
+      margin-top: 14px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .region-context .ctx-row { margin-bottom: 5px; }
+    .region-context .ctx-tension { color: var(--text); margin-top: 8px; font-size: 11.5px; }
+    .accountability-note {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      font-size: 12.5px;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .data-warnings {
+      grid-column: span 12;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .data-warning {
+      border-radius: 5px;
+      padding: 14px 18px;
+      font-size: 13px;
+      line-height: 1.5;
+      border: 1px solid;
+    }
+    .data-warning.critical {
+      background: rgba(248, 81, 73, 0.08);
+      border-color: rgba(248, 81, 73, 0.45);
+      color: var(--text);
+    }
+    .data-warning.warn {
+      background: rgba(210, 153, 34, 0.08);
+      border-color: rgba(210, 153, 34, 0.45);
+      color: var(--text);
+    }
+    .data-warning .warn-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.3px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .data-warning.critical .warn-title { color: var(--warn); }
+    .data-warning.warn .warn-title { color: var(--modeled); }
+    .data-warning.info {
+      background: rgba(79, 209, 197, 0.06);
+      border-color: rgba(79, 209, 197, 0.25);
+    }
+    .data-warning.info .warn-title { color: var(--accent); }
+    .region-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 9px 0; border-top: 1px solid var(--border); font-size: 13.5px;
+    }
+    .region-row .label { color: var(--muted); font-size: 12px; }
+    .region-row .value { font-family: 'JetBrains Mono', monospace; }
+    .region-row .value.highlight { color: var(--accent); }
+
+    /* ============================================================
+       EDUCATIONAL EXPLAINER COPY
+       ============================================================ */
+    .explainer {
+      font-size: 14.5px;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-bottom: 22px;
+      max-width: 940px;
+    }
+    .explainer p { margin-bottom: 10px; }
+    .explainer p:last-child { margin-bottom: 0; }
+    .explainer strong { color: var(--text); font-weight: 600; }
+    .explainer .accent { color: var(--accent); font-weight: 600; }
+
+    /* ============================================================
+       SCOPE DISCLOSURE CALLOUT
+       ============================================================ */
+    .scope-callout {
+      grid-column: span 12;
+      background: linear-gradient(135deg, rgba(210, 153, 34, 0.05) 0%, var(--panel) 60%);
+      border: 1px solid rgba(210, 153, 34, 0.35);
+      border-radius: 5px;
+      padding: 22px 24px;
+      display: grid;
+      grid-template-columns: 1fr 1.5fr;
+      gap: 28px;
+      align-items: start;
+    }
+    .scope-header { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .scope-icon {
+      width: 28px; height: 28px;
+      background: rgba(210, 153, 34, 0.18);
+      border: 1px solid rgba(210, 153, 34, 0.5);
+      color: var(--modeled);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 14px;
+    }
+    .scope-title {
+      font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px;
+      color: var(--modeled); font-weight: 700;
+    }
+    .scope-lede {
+      font-size: 13.5px; color: var(--text); line-height: 1.55; margin-bottom: 14px;
+    }
+    .scope-rationale {
+      font-size: 12.5px; color: var(--muted); line-height: 1.55;
+    }
+    .scope-list { list-style: none; }
+    .scope-list li {
+      padding: 10px 0; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 12.5px;
+    }
+    .scope-list li:last-child { border-bottom: none; }
+    .scope-list .name { color: var(--text); }
+    .scope-list .why { color: var(--muted); font-size: 11px; max-width: 280px; text-align: right; }
+
+    /* ============================================================
+       CTA PANEL
+       ============================================================ */
+    .cta {
+      grid-column: span 12;
+      background: linear-gradient(135deg, rgba(79, 209, 197, 0.06) 0%, var(--panel) 70%);
+      border: 1px solid rgba(79, 209, 197, 0.35);
+      border-radius: 5px;
+      padding: 28px 32px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 32px;
+      align-items: center;
+    }
+    .cta-text h3 { font-size: 18px; font-weight: 600; margin-bottom: 8px; letter-spacing: -0.2px; }
+    .cta-text p { font-size: 13.5px; color: var(--muted); line-height: 1.55; max-width: 600px; }
+    .cta-actions { display: flex; gap: 10px; }
+
+    /* ============================================================
+       SIDEBAR
+       ============================================================ */
+    .side-section { margin-bottom: 26px; }
+    .side-section:last-child { margin-bottom: 0; }
+    .side-section h4 {
+      font-size: 10.5px; text-transform: uppercase; letter-spacing: 1.6px;
+      color: var(--muted); margin-bottom: 14px; font-weight: 600;
+    }
+    .side-list { list-style: none; }
+    .side-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 9px 0; font-size: 13.5px; border-bottom: 1px solid var(--border);
+    }
+    .side-row:last-child { border-bottom: none; }
+    .side-row .key { color: var(--muted); font-size: 12px; }
+    .side-row .val { text-align: right; }
+    .methodology-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .methodology-table td {
+      padding: 10px 0; vertical-align: top; border-bottom: 1px solid var(--border);
+    }
+    .methodology-table tr:last-child td { border-bottom: none; }
+    .methodology-table td:first-child {
+      color: var(--muted); width: 42%; text-transform: uppercase;
+      font-size: 10px; letter-spacing: 1px; padding-right: 10px; padding-top: 11px;
+    }
+    .methodology-table td:nth-child(2) { font-size: 12px; line-height: 1.45; }
+    .tag {
+      display: inline-block; padding: 2px 6px; font-size: 9px;
+      text-transform: uppercase; letter-spacing: 1px; border-radius: 2px;
+      margin-left: 6px; vertical-align: middle; font-weight: 600;
+    }
+    .tag-measured { background: rgba(88, 166, 255, 0.12); color: var(--measured); border: 1px solid rgba(88, 166, 255, 0.3); }
+    .tag-modeled { background: rgba(210, 153, 34, 0.12); color: var(--modeled); border: 1px solid rgba(210, 153, 34, 0.3); }
+    .tag-excluded { background: rgba(248, 81, 73, 0.08); color: var(--warn); border: 1px solid rgba(248, 81, 73, 0.25); }
+    .caveats { list-style: none; font-size: 12px; color: var(--muted); line-height: 1.55; }
+    .caveats li { padding: 6px 0 6px 14px; position: relative; }
+    .caveats li::before { content: '—'; position: absolute; left: 0; }
+
+    /* ============================================================
+       SPARKLINES (KPI inline trend)
+       ============================================================ */
+    .kpi-sparkline {
+      margin-top: 10px;
+      height: 22px;
+      width: 100%;
+      display: block;
+    }
+    .kpi-sparkline .line {
+      fill: none;
+      stroke: var(--accent);
+      stroke-width: 1.3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      opacity: 0.7;
+    }
+    .kpi-sparkline .area {
+      fill: var(--accent);
+      opacity: 0.08;
+    }
+    .kpi-sparkline .end {
+      fill: var(--accent);
+    }
+    .kpi.cost .kpi-sparkline .line,
+    .kpi.cost .kpi-sparkline .end { stroke: var(--measured); fill: var(--measured); }
+    .kpi.cost .kpi-sparkline .area { fill: var(--measured); }
+
+    /* ============================================================
+       STICKY IN-PAGE NAV (appears after main header scrolls past)
+       ============================================================ */
+    .section-nav {
+      position: fixed;
+      top: -50px;
+      left: 0;
+      right: 0;
+      height: 40px;
+      background: rgba(17, 22, 29, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 28px;
+      gap: 4px;
+      z-index: 40;
+      transition: top 240ms cubic-bezier(0.2, 0.8, 0.4, 1);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    }
+    .section-nav.visible { top: 0; }
+    .section-nav a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 1.1px;
+      padding: 5px 10px;
+      border-radius: 3px;
+      font-weight: 600;
+      transition: color 120ms ease, background 120ms ease;
+    }
+    .section-nav a:hover { color: var(--text); background: var(--panel-2); }
+    .section-nav .nav-brand {
+      color: var(--accent);
+      font-weight: 700;
+      letter-spacing: 1.8px;
+      margin-right: 18px;
+      font-size: 11.5px;
+    }
+
+    /* ============================================================
+       LIVE DOT PULSE
+       ============================================================ */
+    @keyframes livePulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.55); }
+      50% { box-shadow: 0 0 0 6px rgba(63, 185, 80, 0); }
+    }
+    .dot.live {
+      animation: livePulse 2.2s ease-in-out infinite;
+    }
+
+    /* ============================================================
+       TOAST NOTIFICATION
+       ============================================================ */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--panel);
+      border: 1px solid var(--accent);
+      color: var(--text);
+      padding: 12px 18px 12px 14px;
+      border-radius: 4px;
+      font-size: 13px;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.55), 0 0 0 1px rgba(79, 209, 197, 0.15);
+      z-index: 200;
+      opacity: 0;
+      transform: translateY(10px);
+      pointer-events: none;
+      transition: opacity 240ms ease, transform 240ms ease;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .toast.visible { opacity: 1; transform: translateY(0); }
+    .toast-icon {
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    /* ============================================================
+       PRINT — used by Export PDF action
+       ============================================================ */
+    @media print {
+      .topbar, .section-nav, .actions, .cta, .toast { display: none !important; }
+      body, html { background: white !important; color: black !important; overflow: visible !important; height: auto !important; }
+      .panel, .kpi { border: 1px solid #ccc !important; background: white !important; color: black !important; box-shadow: none !important; }
+      .main { grid-template-columns: 1fr !important; }
+      .sidebar { background: white !important; border-left: 1px solid #ccc !important; }
+      * { color: black !important; }
+      .accent, .brand-mark, .region-tag, .scope-title { color: #00766c !important; }
+    }
+
+    /* ============================================================
+       RESPONSIVE
+       ============================================================ */
+    @media (max-width: 1300px) {
+      .kpi-strip { grid-template-columns: repeat(3, 1fr); }
+    }
+    @media (max-width: 1100px) {
+      html, body { overflow: auto; }
+      .main { grid-template-columns: 1fr; }
+      .sidebar { border-left: none; border-top: 1px solid var(--border); }
+      .kpi-view-toggle { flex-wrap: wrap; }
+      .kpi-strip { grid-template-columns: repeat(2, 1fr); }
+      .chart-large, .chart-small, .chart-full { grid-column: span 12; }
+      .region { grid-column: span 12; }
+      .scope-callout, .cta { grid-template-columns: 1fr; }
+      .section-nav { overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+
+    <!-- ===== HEADER ===== -->
+    <header class="topbar">
+      <!-- Main nav row -->
+      <div class="topbar-main">
+        <div class="topbar-left">
+          <button type="button" class="brand-home" id="brandHome" title="Scroll to top">
+            <span class="brand">WATER<span class="brand-mark">MARK</span></span>
+          </button>
+          <span class="version-pill">v0.1</span>
+        </div>
+        <p class="header-subtitle" id="brandSubtitle">—</p>
+        <div class="actions">
+          <a class="action-btn" href="./METHODOLOGY.md" target="_blank" rel="noopener">Methodology</a>
+          <button class="action-btn" type="button" data-action="export">Export PDF</button>
+          <button class="action-btn" type="button" data-action="share">Share</button>
+          <a class="action-btn" href="./README.md" target="_blank" rel="noopener">Documentation</a>
+        </div>
+      </div>
+      <!-- Status row -->
+      <div class="topbar-status">
+        <div class="status-left">
+          <div class="status-item">
+            <span class="dot live"></span>
+            <span>Live · last refreshed <span id="refreshTime">just now</span></span>
+          </div>
+          <span class="sep">|</span>
+          <div class="status-item">
+            <span class="key">Data sources</span>
+            <span class="val">4 / 4 online</span>
+          </div>
+          <span class="sep">|</span>
+          <div class="status-item">
+            <span class="key">Methodology</span>
+            <span class="val">v0.1.0</span>
+          </div>
+        </div>
+        <div class="status-right">
+          <div class="status-item">
+            <span class="key">Run</span><span class="val" id="hdrRunId">va-100sdxl-001</span>
+          </div>
+          <span class="sep">|</span>
+          <div class="status-item">
+            <span class="key">Region</span><span class="val" id="hdrRegion">us-east-1</span>
+          </div>
+          <span class="sep">|</span>
+          <div class="status-item">
+            <span class="key" id="hdrTimeKey">UTC</span><span class="val" id="hdrUtc" title="Click to toggle local time">2026-05-30 02:09</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- ===== STICKY SECTION NAV (appears on scroll) ===== -->
+    <nav class="section-nav" id="sectionNav">
+      <span class="nav-brand">WATERMARK</span>
+      <a href="#overview">Overview</a>
+      <a href="#runComparison" id="navCompare" hidden>Compare</a>
+      <a href="#charts">Charts</a>
+      <a href="#water">Water</a>
+      <a href="#regional">Regional</a>
+      <a href="#tradeoff">Tradeoff</a>
+      <a href="#scale">Scale</a>
+      <a href="#scope">Scope</a>
+      <a href="#cta">Get Access</a>
+    </nav>
+
+    <!-- ===== MAIN ===== -->
+    <div class="main">
+      <section class="content">
+
+        <div class="data-warnings" id="dataWarnings" hidden></div>
+
+        <!-- ===== KPI OVERVIEW (toggle + cards) ===== -->
+        <div class="kpi-overview" id="overview">
+          <div class="kpi-view-toggle" id="kpiViewToggle">
+            <span>Carbon &amp; water view:</span>
+            <div class="kpi-view-toggle-buttons">
+              <button type="button" data-view="operational" class="active">Operational</button>
+              <button type="button" data-view="lifecycle">Operational + Embodied</button>
+            </div>
+          </div>
+          <div class="kpi-strip">
+            <div class="kpi" data-kpi="facility"></div>
+            <div class="kpi" data-kpi="carbon"></div>
+            <div class="kpi" data-kpi="water"></div>
+            <div class="kpi cost" data-kpi="cost"></div>
+            <div class="kpi" data-kpi="gpu"></div>
+          </div>
+        </div>
+
+        <!-- ===== RUN COMPARISON (conditional) ===== -->
+        <div class="run-comparison panel chart-full no-zoom" id="runComparison" hidden>
+          <div class="panel-title">Run Comparison</div>
+          <div class="compare-region-banner" id="compareRegionBanner" hidden></div>
+          <div class="compare-columns-header">
+            <span>Metric</span>
+            <span class="compare-col-label" id="comparePrimaryLabel">Primary run</span>
+            <span class="compare-col-label" id="compareSecondaryLabel">Comparison run</span>
+          </div>
+          <div class="compare-grid" id="compareGrid"></div>
+          <div class="compare-caveat">
+            Comparison shows two specific runs. Differences may reflect workload, hardware, region, or grid conditions.
+          </div>
+        </div>
+
+        <!-- ===== CHARTS ROW ===== -->
+        <div class="chart-large panel" id="charts">
+          <div class="panel-title">
+            <span>Power Draw Over Time</span>
+            <span id="chartSamplesMeta" style="font-size:10.5px;color:var(--muted-2);">214 samples · 1 s interval · NVML measured</span>
+          </div>
+          <div class="chart-body tall"><canvas id="powerChart"></canvas></div>
+        </div>
+        <div class="chart-small panel">
+          <div class="panel-title">Energy Breakdown · Wh</div>
+          <div class="chart-body tall"><canvas id="energyPie"></canvas></div>
+        </div>
+
+        <!-- ===== WATER BREAKDOWN EDUCATIONAL PANEL ===== -->
+        <div class="chart-full panel" id="water">
+          <div class="panel-title">
+            <span>Water Breakdown · Direct Cooling vs Indirect Generation</span>
+            <span style="font-size:10.5px;color:var(--muted-2);" id="waterPanelMeta">stacked, per 100 SDXL images</span>
+          </div>
+          <div class="explainer">
+            <p>
+              <span class="accent">Direct cooling water</span> is what the data center itself consumes — evaporative cooling towers, chilled-water loops, humidifiers. Direct cooling water is now region-specific from vendor reports; see sidebar for per-region citations.
+            </p>
+            <p>
+              <span class="accent">Indirect water</span> is freshwater consumed upstream at the power plants that supplied the electricity. This dwarfs direct water and varies wildly by grid mix: hydropower evaporates reservoirs (~17 L/kWh on average), nuclear and fossil need cooling water (1–3 L/kWh), wind and solar PV are near zero.
+              <strong>This is why Sweden — the cleanest carbon grid in the comparison — uses the most water:</strong> its grid is heavily hydropowered, so even with near-zero direct cooling water the indirect generation water dominates.
+            </p>
+            <p>
+              <span class="accent">Watershed stress</span> — the same litre of water means more in a high-stress basin than in a low-stress one. We surface this with a stress weighting derived from WRI Aqueduct baseline water stress (modest multiplier: gross × (1 + stress score)). Basin-level data may not match a specific facility's intake.
+            </p>
+          </div>
+          <div class="chart-body"><canvas id="waterBreakdownChart"></canvas></div>
+        </div>
+
+        <!-- ===== REGIONAL COMPARISON ===== -->
+        <div class="regional-intro panel" id="regionalIntro">
+          <div class="headline" id="regionalHeadline">Same measured energy · three grid scenarios</div>
+          <p id="regionalDescription"></p>
+          <p class="accountability-note" id="regionalAccountability"></p>
+        </div>
+        <div id="regional" class="regional-grid"></div>
+
+        <!-- ===== TRADEOFF CHART ===== -->
+        <div class="chart-full panel" id="tradeoff">
+          <div class="panel-title">
+            <span>Carbon vs Water · Regional Tradeoff</span>
+            <span style="font-size:10.5px;color:var(--muted-2);" id="tradeoffMeta">Sweden 8.7× cleaner on carbon · 2.2× higher on water</span>
+          </div>
+          <div class="chart-body"><canvas id="tradeoffChart"></canvas></div>
+        </div>
+
+        <!-- ===== SCALE & CONTEXT ===== -->
+        <div class="scale-context panel" id="scale">
+          <div class="panel-title">Scale &amp; Context · what these numbers mean in everyday terms</div>
+          <div class="scale-grid" id="scaleContextGrid"></div>
+          <div class="scale-caveat" id="scaleContextCaveat"></div>
+        </div>
+
+        <!-- ===== SCOPE DISCLOSURE CALLOUT ===== -->
+        <div class="scope-callout" id="scope">
+          <div>
+            <div class="scope-header">
+              <div class="scope-icon">!</div>
+              <div class="scope-title">Not measured in v0.1 — explicit scope</div>
+            </div>
+            <div class="scope-lede">
+              Most ESG software hides what it doesn't measure. Watermark publishes its boundaries upfront so you can challenge them.
+            </div>
+            <div class="scope-rationale" id="scopeRationale">
+              The numbers on this dashboard reflect <strong>operational</strong> energy, carbon, and water for a single SDXL inference run, plus modeled embodied hardware impact where a hardware SKU is recognized. Items listed at right remain outside scope unless tagged otherwise.
+            </div>
+          </div>
+          <ul class="scope-list">
+            <li id="scopeEmbodiedRow">
+              <span class="name">Embodied (hardware manufacturing)</span>
+              <span class="why" id="scopeEmbodiedWhy">GPU/CPU/server lifecycle impact, amortized over useful life</span>
+            </li>
+            <li>
+              <span class="name">Network &amp; storage</span>
+              <span class="why">Bandwidth and disk I/O outside the host</span>
+            </li>
+            <li id="scopeStressRow">
+              <span class="name">Watershed-stress weighting</span>
+              <span class="why modeled" id="scopeStressWhy">Modeled (WRI Aqueduct); gross × (1 + stress score)</span>
+            </li>
+            <li>
+              <span class="name">DRAM detail</span>
+              <span class="why">Captured only via RAPL package; discrete DRAM not separated</span>
+            </li>
+            <li>
+              <span class="name">End-of-life</span>
+              <span class="why">e-waste, refurbishment, recycling impact</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- ===== CTA ===== -->
+        <div class="cta" id="cta">
+          <div class="cta-text">
+            <h3>Measure your own AI workloads</h3>
+            <p>Watermark's open-source agent runs alongside your training and inference, producing auditable per-workload footprints with the same methodology shown above. Hosted dashboards, regulator-ready exports, and EU DCRR-compatible reporting in private beta.</p>
+          </div>
+          <div class="cta-actions">
+            <button class="action-btn primary">Request early access →</button>
+            <button class="action-btn">Methodology paper</button>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- ===== SIDEBAR ===== -->
+      <aside class="sidebar">
+        <div class="side-section">
+          <h4>Run</h4>
+          <ul class="side-list" id="sidebarRun"></ul>
+        </div>
+
+        <div class="side-section" id="experimentMetadataSection" hidden>
+          <h4>Experiment metadata</h4>
+          <ul class="side-list" id="sidebarExperimentMetadata"></ul>
+        </div>
+
+        <div class="side-section">
+          <h4>Methodology · Assumptions</h4>
+          <table class="methodology-table" id="methodologyTable"></table>
+        </div>
+
+        <div class="side-section" id="regionalWueSection">
+          <h4>Regional direct WUE</h4>
+          <ul class="side-list" id="regionalWueList"></ul>
+        </div>
+
+        <div class="side-section">
+          <h4>Caveats</h4>
+          <ul class="caveats" id="caveatsList"></ul>
+        </div>
+
+        <div class="side-section">
+          <h4>Legend</h4>
+          <ul class="side-list">
+            <li class="side-row">
+              <span class="key"><span class="dot measured"></span>&nbsp; Measured</span>
+              <span class="val" style="color:var(--muted);font-size:11px;">from hardware</span>
+            </li>
+            <li class="side-row">
+              <span class="key"><span class="dot modeled"></span>&nbsp; Modeled</span>
+              <span class="val" style="color:var(--muted);font-size:11px;">from references</span>
+            </li>
+          </ul>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- ===== TOAST NOTIFICATION ===== -->
+  <div class="toast" id="toast" role="status" aria-live="polite">
+    <span class="toast-icon">✓</span>
+    <span class="toast-msg">Link copied to clipboard</span>
+  </div>
+
+  <script id="wm-data">/*__WATERMARK_DATA__*/</script>
+  <script>
+    Chart.defaults.color = '#7d8590';
+    Chart.defaults.font.family = "'JetBrains Mono', 'SF Mono', Menlo, monospace";
+    Chart.defaults.font.size = 11.5;
+    Chart.defaults.responsive = true;
+    Chart.defaults.maintainAspectRatio = false;
+
+    const DEMO_DATA = {
+      run: { id: 'va-100sdxl-001', region: 'us-east-1', started_at_display: '2026-05-30 02:09', duration_s: 214, duration_display: '00:03:34', samples: 214, interval_s: 1, host_os: 'Linux' },
+      workload: { name: 'SDXL · 100 imgs', seed: 42, steps: 30, hardware: 'H100 SXM 80GB', image_count: 100, per_image_s: 2.14 },
+      kpi: { facility_wh: 47.4, carbon_g: 16.6, carbon_operational_g: 16.6, carbon_embodied_g: 2.3, carbon_lifecycle_g: 18.9, water_ml: 94, water_stress_weighted_ml: 117, water_operational_ml: 94, water_embodied_ml: 63.9, water_lifecycle_ml: 158, water_direct_ml: 3.6, water_indirect_ml: 90.1, gpu_avg_w: 482, cost_usd: 0.20, it_wh: 30.0, cooling_wh: 17.4, per_image_wh: 0.47, per_image_carbon_g: 0.17, per_image_water_ml: 0.94, per_image_cost_usd: 0.002, has_embodied: true },
+      embodied: { co2e_kg: 0.0023, water_l: 0.0639, sku: 'h100-sxm', useful_life_hours: 43800, source: 'modeled', citation: 'NVIDIA HGX H100 PCF Summary 2025 (ISO 14067)' },
+      lifecycle: { carbon: { operational_kg: 0.0166, embodied_kg: 0.0023, total_kg: 0.0189 }, water: { operational_l: 0.118, embodied_l: 0.0639, total_l: 0.1819 } },
+      scope: { embodied_status: 'modeled', embodied_sku: 'h100-sxm', embodied_citation: 'NVIDIA HGX H100 PCF Summary 2025 (ISO 14067)', embodied_useful_life_hours: 43800 },
+      energy: { cpu_wh: 1.3, gpu_wh: 28.7, cooling_wh: 17.4, it_wh: 30.0, facility_wh: 47.4 },
+      formulas: {
+        facility: 'it_total_kwh × PUE\n= 0.029998 × 1.58\n= 0.047397 kWh\n≈ 47.4 Wh',
+        carbon: 'facility_kWh × grid_co2_intensity\n= 0.047397 × 0.35 kg/kWh\n= 0.0166 kg CO₂e\n≈ 16.6 g',
+        water: 'direct (WUE × IT) + indirect (grid × facility)\n= 0.0036 + 0.090 L\n= 3.6 + 90.1 mL\n≈ 94 mL',
+        gpu_avg: 'it_gpu_wh ÷ duration\n= 28.6847 Wh × 3600 ÷ 214 s\n≈ 482 W',
+        cost: 'runtime × hourly rate\n= 214 s × ($3.30 / 3600 s)\n≈ $0.20',
+      },
+      tips: {
+        facility: 'IT energy from modeled_from_util (CPU) + nvml_pynvml (GPU). PUE 1.58 from default_iea_2024.',
+        carbon: 'Grid intensity: EPA eGRID 2022 / IEA 2024 annual average. Use --grid-source electricitymaps for realtime carbon.',
+        water: 'WUE 0.12 L/kWh IT (aws_2024_virginia). Indirect: NREL Macknick 2012 + USGS 2020.',
+        gpu: 'NVIDIA NVML (pynvml), 1 s sampling. 214 samples over the run.',
+        cost: 'Runpod H100 SXM on-demand rate (May 2026): $3.29/hr GPU + storage/network.',
+      },
+      methodology: {
+        cpu: { text: 'Modeled from utilization — RAPL blocked on Runpod hypervisor', tag: 'modeled' },
+        gpu: { text: 'NVIDIA NVML, 1 s sampling', tag: 'measured' },
+        pue: { text: '1.58 — default_iea_2024', tag: 'modeled' },
+        carbon: { text: '0.35 kg/kWh — US Virginia annual average (static_avg)', tag: 'modeled' },
+        wue: { text: '0.12 L/kWh — aws_2024_virginia', tag: 'modeled' },
+        indirect_water: { text: 'NREL Macknick 2012 + USGS 2020', tag: 'modeled' },
+        carbon_source: 'static_avg',
+      },
+      timeseries: {
+        gpu_watts: Array.from({ length: 214 }, (_, s) => s < 15 ? 220 + Math.random() * 60 : 460 + Math.random() * 50),
+        cpu_watts: Array.from({ length: 214 }, (_, s) => s < 15 ? 35 + Math.random() * 15 : 18 + Math.random() * 8),
+        gpu_label: 'measured',
+        cpu_label: 'modeled',
+      },
+      regional: [
+        { region: 'us-east-1', chart_label: 'Virginia (us-east-1)', short_label: 'Virginia', carbon_g: 16.59, water_ml: 93.7, stress_weighted_ml: 117.1, direct_ml: 3.6, indirect_ml: 90.1, grid_co2: 0.35, wue_direct_l_per_kwh: 0.12, wue_source: 'aws_2024_virginia', stress_score: 0.25, stress_level: 'low-medium', stress_basin: 'Lower Chesapeake', stress_badge: 'LOW–MEDIUM STRESS', is_measured_region: true, energy_source: 'measured', badge: 'RUN REGION' },
+        { region: 'us-west-2', chart_label: 'Oregon (us-west-2)', short_label: 'Oregon', carbon_g: 5.21, water_ml: 203.9, stress_weighted_ml: 203.9, direct_ml: 4.8, indirect_ml: 199.1, grid_co2: 0.11, wue_direct_l_per_kwh: 0.16, wue_source: 'aws_2024_oregon', stress_score: 0, stress_level: 'low', stress_basin: 'Columbia River', stress_badge: 'LOW STRESS', is_measured_region: false, energy_source: 'grid_scenario', badge: 'GRID SCENARIO' },
+        { region: 'eu-north-1', chart_label: 'Sweden (eu-north-1)', short_label: 'Sweden', carbon_g: 1.90, water_ml: 237.6, stress_weighted_ml: 297.0, direct_ml: 0.6, indirect_ml: 237.0, grid_co2: 0.04, wue_direct_l_per_kwh: 0.02, wue_source: 'aws_2024_stockholm', stress_score: 0.25, stress_level: 'low-medium', stress_basin: 'Lake Mälaren', stress_badge: 'LOW–MEDIUM STRESS', is_measured_region: false, energy_source: 'grid_scenario', badge: 'GRID SCENARIO' },
+      ],
+      regional_wue: [
+        { region: 'us-east-1', label: 'Virginia', wue_direct_l_per_kwh: 0.12, wue_source: 'aws_2024_virginia' },
+        { region: 'us-west-2', label: 'Oregon', wue_direct_l_per_kwh: 0.16, wue_source: 'aws_2024_oregon' },
+        { region: 'eu-north-1', label: 'Sweden', wue_direct_l_per_kwh: 0.02, wue_source: 'aws_2024_stockholm' },
+      ],
+      regional_meta: {
+        measured_region: 'us-east-1',
+        measured_label: 'US Virginia (PJM Mid-Atlantic)',
+        headline: 'Same measured energy · three grid scenarios',
+        description: 'IT energy was measured once in us-east-1 (US Virginia). Oregon and Sweden re-apply the same watt-hours against different regional grid carbon and water intensities — counterfactual footprints, not separate runs.',
+        accountability_note: 'Public debate focuses on where data centers land and what they draw from local grids and watersheds. Watermark answers the next question: what did this specific workload cost — in energy, carbon, and water — with every assumption tagged.',
+      },
+      tradeoff: { carbon_ratio_vs_cleanest: 8.7, water_ratio_cleanest_vs_measured: 2.2, cleanest_region: 'eu-north-1' },
+      warnings: [],
+      publish_safe: true,
+      wue_direct: 0.12,
+      caveats: [
+        'Virginia values are measured on rented H100 SXM. Oregon and Sweden apply regional multipliers to the same measured energy.',
+        'Carbon and water are regional annual averages unless --grid-source electricitymaps is used for carbon.',
+        'Embodied hardware impact modeled when --hardware-sku or --hardware is recognized; amortized over useful life.',
+      ],
+    };
+
+    const DATA = window.WATERMARK_DATA || DEMO_DATA;
+    const runData = DATA.primary || DATA;
+    const compareData = DATA.comparison || null;
+
+    function runLabel(data) {
+      const w = data.workload || {};
+      const run = data.run || {};
+      const parts = [];
+      if (w.name) parts.push(w.name);
+      if (run.id) parts.push(run.id);
+      if (!parts.length) parts.push(run.region_label || run.region || 'Run');
+      return parts.join(' · ');
+    }
+
+    function formatCompareValue(value, decimals, prefix) {
+      if (value == null || !isFinite(value)) return '—';
+      const p = prefix || '';
+      return `${p}${Number(value).toFixed(decimals)}`;
+    }
+
+    function pctDelta(primary, comparison) {
+      if (primary == null || comparison == null || primary === 0) return null;
+      return ((comparison - primary) / primary) * 100;
+    }
+
+    function formatPct(pct) {
+      if (pct == null || !isFinite(pct)) return '—';
+      const sign = pct > 0 ? '+' : '';
+      return `${sign}${pct.toFixed(1)}% vs primary`;
+    }
+
+    function deltaClass(pct) {
+      if (pct == null || !isFinite(pct) || Math.abs(pct) < 0.05) return 'delta-neutral';
+      return pct < 0 ? 'delta-good' : 'delta-bad';
+    }
+
+    function runRegionDisplay(run, data) {
+      const grid = run.region_label || run.region;
+      const facility = data?.workload?.facility_location;
+      if (facility) {
+        return `${facility} <span class="mono" style="font-size:10px;color:var(--muted-2);">· grid profile: ${grid}</span>`;
+      }
+      return grid;
+    }
+
+    function renderRunComparison(primary, comparison) {
+      const section = document.getElementById('runComparison');
+      const navLink = document.getElementById('navCompare');
+      if (!section || !comparison) {
+        if (section) section.hidden = true;
+        if (navLink) navLink.hidden = true;
+        return;
+      }
+      section.hidden = false;
+      if (navLink) navLink.hidden = false;
+
+      const primaryLabel = document.getElementById('comparePrimaryLabel');
+      const secondaryLabel = document.getElementById('compareSecondaryLabel');
+      if (primaryLabel) {
+        primaryLabel.innerHTML = `${runLabel(primary)}<span class="region-tag run-region">${primary.run.region_label || primary.run.region}</span>`;
+      }
+      if (secondaryLabel) {
+        secondaryLabel.innerHTML = `${runLabel(comparison)}<span class="region-tag run-region">${runRegionDisplay(comparison.run, comparison)}</span>`;
+      }
+
+      const regionBanner = document.getElementById('compareRegionBanner');
+      const sameRegion = primary.run.region === comparison.run.region;
+      if (regionBanner) {
+        if (sameRegion) {
+          regionBanner.hidden = true;
+        } else {
+          regionBanner.hidden = false;
+          let banner = `<strong>Different regions.</strong> Primary: <span class="mono">${runRegionDisplay(primary.run, primary)}</span>. Comparison: <span class="mono">${runRegionDisplay(comparison.run, comparison)}</span>. Same workload in different regions tells a different story than the same region with different workloads.`;
+          const cmpNote = (comparison.warnings || []).find(w => w.title === 'Grid profile vs facility location');
+          if (cmpNote) banner += `<br><br>${cmpNote.message}`;
+          regionBanner.innerHTML = banner;
+        }
+      }
+
+      const pk = primary.kpi;
+      const ck = comparison.kpi;
+      const metrics = [
+        { key: 'facility_wh', label: 'Energy', unit: 'Wh', decimals: 1 },
+        { key: 'carbon_g', label: 'Carbon', unit: 'g CO₂e', decimals: 1 },
+        { key: 'water_ml', label: 'Water', unit: 'mL', decimals: 0 },
+      ];
+      if (pk.cost_usd != null || ck.cost_usd != null) {
+        metrics.push({ key: 'cost_usd', label: 'Cost', unit: 'USD', decimals: 2, prefix: '$' });
+      }
+
+      const grid = document.getElementById('compareGrid');
+      if (!grid) return;
+      grid.innerHTML = metrics.map(m => {
+        const pv = pk[m.key];
+        const cv = ck[m.key];
+        const pct = pctDelta(pv, cv);
+        const deltaCls = deltaClass(pct);
+        const prefix = m.prefix || '';
+        return `
+          <div class="compare-row">
+            <div class="compare-metric-label">${m.label}</div>
+            <div>
+              <div class="compare-value">${formatCompareValue(pv, m.decimals, prefix)} <span class="unit">${m.unit}</span></div>
+            </div>
+            <div>
+              <div class="compare-value">${formatCompareValue(cv, m.decimals, prefix)} <span class="unit">${m.unit}</span></div>
+              <div class="compare-delta ${deltaCls}">${formatPct(pct)}</div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    function tagHtml(tag) {
+      const cls = tag === 'measured' ? 'tag-measured' : tag === 'excluded' ? 'tag-excluded' : 'tag-modeled';
+      const label = tag === 'measured' ? 'measured' : tag === 'excluded' ? 'scope' : 'modeled';
+      return `<span class="tag ${cls}">${label}</span>`;
+    }
+
+    function sparklineSvg(values, accent) {
+      if (!values || values.length < 2) {
+        return `<svg class="kpi-sparkline" viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true"><path class="line" d="M0,11 L100,11"/></svg>`;
+      }
+      const step = 100 / (values.length - 1);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const span = max - min || 1;
+      const pts = values.map((v, i) => {
+        const x = i * step;
+        const y = 20 - ((v - min) / span) * 16;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+      const line = `M${pts.join(' L')}`;
+      const area = `${line} L100,22 L0,22 Z`;
+      const last = pts[pts.length - 1].split(',');
+      return `<svg class="kpi-sparkline" viewBox="0 0 100 22" preserveAspectRatio="none" aria-hidden="true">
+        <path class="area" d="${area}"/>
+        <path class="line" d="${line}"/>
+        <circle class="end" cx="${last[0]}" cy="${last[1]}" r="2"/>
+      </svg>`;
+    }
+
+    function kpiDerivationHtml(cfg) {
+      if (!cfg.showDerivation) return '';
+      return `
+        <div class="kpi-label-row">
+          <div class="label">${cfg.label}</div>
+          <button type="button" class="kpi-info-btn" aria-label="How this was derived" aria-expanded="false" title="How this was derived">i</button>
+        </div>
+        <div class="kpi-derivation" hidden>
+          <div class="derivation-title">How this was derived</div>
+          <div class="derivation-formula">${cfg.formula || ''}</div>
+          <div class="derivation-source">${cfg.tip || ''}</div>
+        </div>`;
+    }
+
+    function bindKpiDerivationButtons() {
+      document.querySelectorAll('.kpi-info-btn').forEach(btn => {
+        btn.onclick = () => {
+          const panel = btn.closest('.kpi')?.querySelector('.kpi-derivation');
+          if (!panel) return;
+          const open = btn.getAttribute('aria-expanded') === 'true';
+          btn.setAttribute('aria-expanded', open ? 'false' : 'true');
+          panel.hidden = open;
+        };
+      });
+    }
+
+    function renderKpiCard(el, cfg) {
+      const measuredClass = cfg.measured ? ' measured' : '';
+      const prefix = cfg.prefix || '';
+      const labelHtml = cfg.showDerivation
+        ? kpiDerivationHtml(cfg)
+        : `<div class="label">${cfg.label}</div>`;
+      if (cfg.rows && cfg.rows.length) {
+        el.innerHTML = `
+        ${labelHtml}
+        <div class="value-wrap">
+          <div class="kpi-rows">
+            ${cfg.rows.map(row => {
+              const rowPrefix = row.prefix || '';
+              const rowMeasured = row.measured ? ' measured' : '';
+              const rowClass = row.emphasis ? ' lifecycle' : '';
+              return `
+            <div class="kpi-row${rowClass}">
+              <span class="kpi-row-label">${row.label}${row.tag ? tagHtml(row.tag) : ''}</span>
+              <span class="value mono${rowMeasured}${row.emphasis ? ' emphasis' : ''}">
+                <span class="num" data-target="${row.value}" data-decimals="${row.decimals}" data-prefix="${rowPrefix}">${rowPrefix}0</span>
+                ${row.unit ? `<span class="unit">${row.unit}</span>` : ''}
+              </span>
+            </div>`;
+            }).join('')}
+          </div>
+        </div>
+        ${cfg.anchor ? `<div class="anchor">${cfg.anchor}</div>` : ''}
+        ${cfg.benchmark ? `<div class="benchmark">${cfg.benchmark}</div>` : ''}
+        ${cfg.sparkline ? sparklineSvg(cfg.sparkline, cfg.accent) : ''}
+      `;
+        return;
+      }
+      el.innerHTML = `
+        ${labelHtml}
+        <div class="value-wrap">
+          <span class="value mono${measuredClass}">
+            <span class="num" data-target="${cfg.value}" data-decimals="${cfg.decimals}" data-prefix="${prefix}">${prefix}0</span>
+            ${cfg.unit ? `<span class="unit">${cfg.unit}</span>` : ''}
+          </span>
+        </div>
+        ${cfg.anchor ? `<div class="anchor">${cfg.anchor}</div>` : ''}
+        ${cfg.benchmark ? `<div class="benchmark">${cfg.benchmark}</div>` : ''}
+        ${cfg.sparkline ? sparklineSvg(cfg.sparkline, cfg.accent) : ''}
+      `;
+    }
+
+    const KPI_VIEW_STORAGE_KEY = 'watermark.kpiView';
+    let kpiView = 'operational';
+    let currentKpiData = null;
+
+    function loadKpiView(hasEmbodied) {
+      try {
+        const stored = localStorage.getItem(KPI_VIEW_STORAGE_KEY);
+        if (stored === 'lifecycle' && hasEmbodied) return 'lifecycle';
+        if (stored === 'operational') return 'operational';
+      } catch (_) { /* private browsing */ }
+      return 'operational';
+    }
+
+    function saveKpiView(view) {
+      try {
+        localStorage.setItem(KPI_VIEW_STORAGE_KEY, view);
+      } catch (_) { /* private browsing */ }
+    }
+
+    function countImpactKpiRows(card) {
+      return card.rows ? card.rows.length : 1;
+    }
+
+    function buildImpactKpiCards(k, data, view) {
+      const trade = data.tradeoff || {};
+      const gpuSeries = data.timeseries.gpu_watts || [];
+      const cleanestLabel = (data.regional.find(r => r.region === trade.cleanest_region) || {}).short_label || 'cleanest region';
+      const carbonOp = k.carbon_operational_g ?? k.carbon_g;
+      const waterOp = k.water_operational_ml ?? k.water_ml;
+      const carbonEmb = k.carbon_embodied_g ?? 0;
+      const waterEmb = k.water_embodied_ml ?? 0;
+      const carbonLife = k.carbon_lifecycle_g ?? carbonOp;
+      const waterLife = k.water_lifecycle_ml ?? waterOp;
+      const hasEmbodied = k.has_embodied === true;
+      const showLifecycle = view === 'lifecycle' && hasEmbodied;
+      const carbonBenchmark = `${k.per_image_carbon_g ? k.per_image_carbon_g + ' g/img · ' : ''}${trade.carbon_ratio_vs_cleanest || '—'}× higher than ${cleanestLabel}`;
+      const waterStressWeighted = k.water_stress_weighted_ml ?? k.water_ml;
+      const waterBenchmark = `${waterOp} mL gross · ${waterStressWeighted} mL stress-weighted · ${k.water_direct_ml} direct · ${k.water_indirect_ml} indirect${k.per_image_water_ml ? ` · ${k.per_image_water_ml} mL/img` : ''}`;
+
+      const carbonCard = showLifecycle ? {
+        label: 'Carbon · CO₂e',
+        showDerivation: true,
+        rows: [
+          { label: 'Operational', tag: data.methodology?.carbon?.tag || 'modeled', value: carbonOp, decimals: 1, unit: 'g' },
+          { label: 'Embodied', tag: 'modeled', value: carbonEmb, decimals: 2, unit: 'g' },
+          { label: 'Lifecycle', value: carbonLife, decimals: 2, unit: 'g', emphasis: true },
+        ],
+        formula: data.formulas.carbon,
+        tip: data.tips.embodied ? `${data.tips.carbon} · ${data.tips.embodied}` : data.tips.carbon,
+        benchmark: carbonBenchmark,
+        sparkline: data.timeseries.cpu_watts,
+      } : {
+        label: 'Carbon · CO₂e',
+        showDerivation: true,
+        value: carbonOp, decimals: 1, unit: 'g',
+        formula: data.formulas.carbon, tip: data.tips.carbon,
+        benchmark: carbonBenchmark,
+        sparkline: data.timeseries.cpu_watts,
+      };
+
+      const waterCard = showLifecycle ? {
+        label: 'Water · Total',
+        showDerivation: true,
+        rows: [
+          { label: 'Operational', tag: data.methodology?.wue?.tag || 'modeled', value: waterOp, decimals: 0, unit: 'mL' },
+          { label: 'Embodied', tag: 'modeled', value: waterEmb, decimals: 1, unit: 'mL' },
+          { label: 'Lifecycle', value: waterLife, decimals: 1, unit: 'mL', emphasis: true },
+        ],
+        formula: data.formulas.water,
+        tip: data.tips.embodied ? `${data.tips.water} · ${data.tips.embodied}` : data.tips.water,
+        anchor: waterLife < 250 ? '≈ ½ cup of drinking water' : '≈ 1 cup of drinking water',
+        benchmark: waterBenchmark,
+        sparkline: gpuSeries,
+      } : {
+        label: 'Water · Total',
+        showDerivation: true,
+        value: waterOp, decimals: 0, unit: 'mL',
+        formula: data.formulas.water, tip: data.tips.water,
+        anchor: waterOp < 250 ? '≈ ½ cup of drinking water' : '≈ 1 cup of drinking water',
+        benchmark: waterBenchmark,
+        sparkline: gpuSeries,
+      };
+
+      return { carbon: carbonCard, water: waterCard };
+    }
+
+    function renderKpis(data) {
+      const k = data.kpi;
+      const gpuSeries = data.timeseries.gpu_watts || [];
+      const impactCards = buildImpactKpiCards(k, data, kpiView);
+
+      const cards = {
+        facility: {
+          label: 'Energy · Facility',
+          value: k.facility_wh, decimals: 1, unit: 'Wh', measured: true,
+          formula: data.formulas.facility, tip: data.tips.facility,
+          anchor: k.facility_wh < 100 ? '≈ single-digit Wh footprint' : '≈ 4 smartphone charges',
+          benchmark: `IT ${k.it_wh} Wh · cooling ${k.cooling_wh} Wh${k.per_image_wh ? ` · ${k.per_image_wh} Wh/img` : ''}`,
+          sparkline: gpuSeries.length ? gpuSeries : data.timeseries.cpu_watts,
+        },
+        carbon: impactCards.carbon,
+        water: impactCards.water,
+        cost: {
+          label: 'Cost · Compute',
+          value: k.cost_usd != null ? k.cost_usd : 0,
+          decimals: 2, prefix: '$', measured: k.cost_usd != null,
+          formula: data.formulas.cost || 'Provide --compute-rate to estimate cost',
+          tip: data.tips.cost || 'Pass --compute-rate USD/hr when running watermark_meter.py',
+          anchor: k.per_image_cost_usd ? `$${k.per_image_cost_usd} per image` : (k.cost_usd == null ? 'Rate not supplied' : ''),
+          benchmark: k.cost_usd != null ? 'On-demand GPU rental estimate' : 'Add --compute-rate to populate',
+          sparkline: gpuSeries,
+        },
+        gpu: {
+          label: 'GPU · Avg Draw',
+          value: k.gpu_avg_w, decimals: 0, unit: 'W', measured: data.timeseries.gpu_label === 'measured',
+          formula: data.formulas.gpu_avg, tip: data.tips.gpu,
+          anchor: k.gpu_avg_w ? `~${Math.round(k.gpu_avg_w / 700 * 100)}% of H100 SXM peak (700W)` : 'No GPU recorded',
+          benchmark: data.timeseries.gpu_label === 'measured' ? 'NVML hardware sampling' : 'GPU not detected on this host',
+          sparkline: gpuSeries,
+        },
+      };
+
+      document.querySelectorAll('[data-kpi]').forEach(el => {
+        const key = el.dataset.kpi;
+        if (cards[key]) renderKpiCard(el, cards[key]);
+      });
+      bindKpiDerivationButtons();
+    }
+
+    function setupKpiToggle(data) {
+      currentKpiData = data;
+      const toggle = document.getElementById('kpiViewToggle');
+      if (!toggle) return;
+
+      const hasEmbodied = data.kpi?.has_embodied === true;
+      kpiView = loadKpiView(hasEmbodied);
+
+      toggle.querySelectorAll('button[data-view]').forEach(btn => {
+        const view = btn.dataset.view;
+        const isLifecycle = view === 'lifecycle';
+        if (isLifecycle && !hasEmbodied) {
+          btn.disabled = true;
+          btn.title = 'Pass --hardware-sku to enable lifecycle view.';
+        } else {
+          btn.disabled = false;
+          btn.title = isLifecycle
+            ? 'Show operational, embodied, and lifecycle totals'
+            : 'Show operational totals only';
+        }
+        btn.classList.toggle('active', view === kpiView);
+        btn.onclick = () => {
+          if (btn.disabled) return;
+          kpiView = view;
+          saveKpiView(kpiView);
+          toggle.querySelectorAll('button[data-view]').forEach(b =>
+            b.classList.toggle('active', b.dataset.view === kpiView));
+          renderKpis(currentKpiData);
+          runCounters();
+        };
+      });
+    }
+
+    function renderWarnings(data) {
+      const container = document.getElementById('dataWarnings');
+      const warnings = data.warnings || [];
+      if (!warnings.length) {
+        container.hidden = true;
+        container.innerHTML = '';
+        return;
+      }
+      container.hidden = false;
+      container.innerHTML = warnings.map(w => `
+        <div class="data-warning ${w.level}">
+          <div class="warn-title">${w.title}</div>
+          <div>${w.message}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderRegionalIntro(data) {
+      const meta = data.regional_meta || {};
+      document.getElementById('regionalHeadline').textContent =
+        meta.headline || 'Same measured energy · three grid scenarios';
+      document.getElementById('regionalDescription').textContent =
+        meta.description || 'Comparison regions apply the same measured IT energy against different grid profiles.';
+      const acct = document.getElementById('regionalAccountability');
+      if (meta.accountability_note) {
+        acct.textContent = meta.accountability_note;
+        acct.hidden = false;
+      } else {
+        acct.hidden = true;
+      }
+    }
+
+    function formatRegionContext(ctx) {
+      if (!ctx || !ctx.facility_note) return '';
+      return `
+        <div class="region-context">
+          <div class="ctx-row">${ctx.facility_note}</div>
+          <div class="ctx-row">Carbon: ${ctx.carbon_note || ''}</div>
+          <div class="ctx-row">Water: ${ctx.water_note || ''}</div>
+          <div class="ctx-tension">${ctx.tension || ''}</div>
+        </div>`;
+    }
+
+    function renderRegional(data) {
+      const cleanest = data.regional.reduce((a, b) => (a.carbon_g < b.carbon_g ? a : b));
+      const container = document.getElementById('regional');
+      container.innerHTML = data.regional.map(r => {
+        const isCleanest = r.region === cleanest.region;
+        const badgeClass = r.is_measured_region ? 'run-region' : 'scenario';
+        const panelClass = r.is_measured_region ? ' run-region' : ' scenario';
+        const cleanestTag = isCleanest ? '<span class="region-tag">CLEANEST CARBON</span>' : '';
+        const stressClass = (r.stress_level === 'extremely-high' || r.stress_level === 'high') ? 'stress extreme' : 'stress';
+        const stressBadge = r.stress_badge
+          ? `<span class="region-tag ${stressClass}">${r.stress_badge}</span>` : '';
+        return `
+          <div class="region panel${panelClass}${isCleanest ? ' cleanest' : ''}">
+            <div class="region-name">${r.region}</div>
+            <div class="region-label">
+              <span>${r.short_label}</span>
+              <span>
+                <span class="region-tag ${badgeClass}">${r.badge || (r.is_measured_region ? 'RUN REGION' : 'GRID SCENARIO')}</span>
+                ${stressBadge}
+                ${cleanestTag}
+              </span>
+            </div>
+            <div class="region-row"><span class="label">Direct WUE</span><span class="value">${r.wue_direct_l_per_kwh} L/kWh</span></div>
+            <div class="region-row"><span class="label">Carbon</span><span class="value${isCleanest ? ' highlight' : ''}">${r.carbon_g} g</span></div>
+            <div class="region-row"><span class="label">Water</span><span class="value">${r.water_ml} mL gross · ${r.stress_weighted_ml ?? r.water_ml} mL weighted</span></div>
+            <div class="region-row"><span class="label">Grid CO₂</span><span class="value">${r.grid_co2} kg/kWh</span></div>
+            <div class="region-row"><span class="label">Energy basis</span><span class="value" style="font-size:11px;color:var(--muted);">${r.is_measured_region ? 'Measured here' : 'Same IT kWh × grid'}</span></div>
+            ${formatRegionContext(r.context)}
+          </div>`;
+      }).join('');
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+    }
+
+    function renderSidebar(data) {
+      const run = data.run;
+      const w = data.workload || {};
+      const rows = [];
+      if (run.id) rows.push(['Run ID', run.id, true]);
+      if (w.name) rows.push(['Workload', w.name]);
+      if (w.hardware) rows.push(['Hardware', w.hardware]);
+      if (w.seed != null) rows.push(['Seed', w.seed, true]);
+      if (w.steps != null) rows.push(['Steps/img', w.steps, true]);
+      rows.push(['Duration', run.duration_display, true]);
+      if (w.per_image_s != null) rows.push(['Per image', `${w.per_image_s} s`, true]);
+      if (!rows.length) rows.push(['Host', run.host_os]);
+
+      document.getElementById('sidebarRun').innerHTML = rows.map(([k, v, mono]) =>
+        `<li class="side-row"><span class="key">${k}</span><span class="val${mono ? ' mono' : ''}">${escapeHtml(String(v))}</span></li>`
+      ).join('');
+
+      const metaRows = [];
+      if (w.model) metaRows.push(['Model', w.model, true]);
+      if (w.facility_location) metaRows.push(['Facility location', w.facility_location]);
+      if (w.cooling_system) metaRows.push(['Cooling system', w.cooling_system]);
+      if (w.notes) metaRows.push(['Notes', w.notes]);
+      const metaSection = document.getElementById('experimentMetadataSection');
+      const metaList = document.getElementById('sidebarExperimentMetadata');
+      if (metaSection && metaList) {
+        if (metaRows.length) {
+          metaSection.hidden = false;
+          metaList.innerHTML = metaRows.map(([k, v, mono]) =>
+            `<li class="side-row"><span class="key">${k}</span><span class="val${mono ? ' mono' : ''}">${escapeHtml(String(v))}</span></li>`
+          ).join('');
+        } else {
+          metaSection.hidden = true;
+          metaList.innerHTML = '';
+        }
+      }
+
+      const m = data.methodology;
+      const methodRows = [
+        ['CPU energy', m.cpu.text, m.cpu.tag],
+        ['GPU power', m.gpu.text, m.gpu.tag],
+        ['Facility PUE', m.pue.text, m.pue.tag],
+        ['Grid CO₂', m.carbon.text, m.carbon.tag],
+        ['Direct WUE', m.wue.text, m.wue.tag],
+        ['Indirect water', m.indirect_water.text, m.indirect_water.tag],
+      ];
+      if (data.kpi.cost_usd != null) {
+        methodRows.push(['Compute cost', data.tips.cost || 'User-supplied hourly rate', 'measured']);
+      }
+      methodRows.push(['Embodied', 'Not included', 'excluded']);
+      methodRows.push(['Network / storage', 'Not separately accounted', 'excluded']);
+
+      document.getElementById('methodologyTable').innerHTML = methodRows.map(([k, v, tag]) =>
+        `<tr><td>${k}</td><td>${v} ${tagHtml(tag)}</td></tr>`
+      ).join('');
+
+      const wueList = document.getElementById('regionalWueList');
+      const wueSection = document.getElementById('regionalWueSection');
+      const regionalWue = data.regional_wue || [];
+      if (wueList && regionalWue.length) {
+        wueSection.hidden = false;
+        wueList.innerHTML = regionalWue.map(r =>
+          `<li class="side-row"><span class="key">${r.label}</span><span class="val mono">${r.wue_direct_l_per_kwh} L/kWh <span style="color:var(--muted);font-size:10px;">${r.wue_source}</span></span></li>`
+        ).join('');
+      } else if (wueSection) {
+        wueSection.hidden = true;
+      }
+
+      document.getElementById('caveatsList').innerHTML = (data.caveats || [])
+        .map(c => `<li>${c}</li>`).join('');
+    }
+
+    let hdrRunStartedIso = '';
+    let hdrTimeIsUtc = true;
+
+    function parseRunIso(iso) {
+      if (!iso) return null;
+      let s = String(iso).trim();
+      // Sub-millisecond fractions break ISO parsing in some browsers (e.g. Safari).
+      s = s.replace(/(\.\d{3})\d+(?=[Z+-]|$)/, '$1');
+      if (!/[zZ]|[+-]\d{2}:\d{2}$/.test(s)) {
+        s = s.includes(' ') && !s.includes('T') ? s.replace(' ', 'T') + 'Z' : `${s}Z`;
+      }
+      let d = new Date(s);
+      if (Number.isNaN(d.getTime())) {
+        d = new Date(s.replace(/\.\d+(?=[Z+-]|$)/, ''));
+      }
+      return Number.isNaN(d.getTime()) ? null : d;
+    }
+
+    function pad2(n) {
+      return String(n).padStart(2, '0');
+    }
+
+    function formatHdrUtc(iso) {
+      const d = parseRunIso(iso);
+      if (!d) return '—';
+      return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())} `
+        + `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`;
+    }
+
+    function formatHdrLocal(iso) {
+      const d = parseRunIso(iso);
+      if (!d) return '—';
+      try {
+        return new Intl.DateTimeFormat(undefined, {
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: 'numeric',
+          minute: '2-digit',
+          hour12: true,
+          timeZoneName: 'short',
+        }).format(d);
+      } catch (_) {
+        const h24 = d.getHours();
+        const h12 = h24 % 12 || 12;
+        const ampm = h24 >= 12 ? 'PM' : 'AM';
+        return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} `
+          + `${h12}:${pad2(d.getMinutes())} ${ampm}`;
+      }
+    }
+
+    function renderHdrRunTime() {
+      const el = document.getElementById('hdrUtc');
+      const key = document.getElementById('hdrTimeKey');
+      if (!el) return;
+      if (key) key.textContent = hdrTimeIsUtc ? 'UTC' : 'Local';
+      el.textContent = hdrRunStartedIso
+        ? (hdrTimeIsUtc ? formatHdrUtc(hdrRunStartedIso) : formatHdrLocal(hdrRunStartedIso))
+        : '—';
+      el.title = hdrTimeIsUtc ? 'Click for local time' : 'Click for UTC';
+    }
+
+    function renderBrandSubtitle(data) {
+      const el = document.getElementById('brandSubtitle');
+      if (!el) return;
+      const w = data.workload || {};
+      const run = data.run || {};
+      const workloadName = w.name || run.id || 'this workload';
+      const hardware = w.hardware || '—';
+      const regionLabel = run.region_label || run.region || '—';
+      el.textContent = `Workload footprint · ${workloadName} · ${hardware} · ${regionLabel}`;
+    }
+
+    function renderHeader(data) {
+      renderBrandSubtitle(data);
+      document.getElementById('hdrRunId').textContent = data.run.id;
+      document.getElementById('hdrRegion').textContent = data.run.region;
+      hdrRunStartedIso = data.run.started_at_utc || '';
+      hdrTimeIsUtc = true;
+      renderHdrRunTime();
+      document.getElementById('chartSamplesMeta').textContent =
+        `${data.run.samples} samples · ${data.run.interval_s} s interval · GPU ${data.timeseries.gpu_label}, CPU ${data.timeseries.cpu_label}`;
+      const imgCount = (data.workload || {}).image_count;
+      document.getElementById('waterPanelMeta').textContent =
+        imgCount ? `stacked · same measured energy · per ${imgCount} images` : 'stacked · same measured IT energy across three grid scenarios';
+      const cleanest = data.regional.reduce((a, b) => (a.carbon_g < b.carbon_g ? a : b));
+      const measured = data.regional.find(r => r.is_measured_region) || data.regional[0];
+      const trade = data.tradeoff || {};
+      let tradeoffText;
+      if (measured.region === cleanest.region) {
+        tradeoffText = `${cleanest.short_label} is the run region and lowest carbon · water varies by grid mix`;
+      } else {
+        tradeoffText = `${cleanest.short_label} ${trade.carbon_ratio_vs_cleanest}× cleaner on carbon · ${trade.water_ratio_cleanest_vs_measured}× higher on water (same energy)`;
+      }
+      document.getElementById('tradeoffMeta').textContent = tradeoffText;
+    }
+
+    function buildCharts(data) {
+      const gpu = data.timeseries.gpu_watts || [];
+      const cpu = data.timeseries.cpu_watts || [];
+      const len = Math.max(gpu.length, cpu.length, 1);
+      const labels = Array.from({ length: len }, (_, i) => i + 's');
+      const gpuLabel = data.timeseries.gpu_label === 'measured' ? 'GPU watts (measured)' : 'GPU watts (no data)';
+      const cpuLabel = data.timeseries.cpu_label === 'measured' ? 'CPU watts (measured)' : 'CPU watts (modeled)';
+
+      new Chart(document.getElementById('powerChart').getContext('2d'), {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [
+            { label: gpuLabel, data: gpu.length ? gpu : labels.map(() => null), borderColor: '#4fd1c5', backgroundColor: 'rgba(79, 209, 197, 0.08)', tension: 0.3, fill: true, pointRadius: 0, borderWidth: 1.4 },
+            { label: cpuLabel, data: cpu.length ? cpu : labels.map(() => null), borderColor: '#58a6ff', backgroundColor: 'transparent', tension: 0.3, pointRadius: 0, borderWidth: 1.4 },
+          ],
+        },
+        options: {
+          plugins: { legend: { position: 'top', align: 'end', labels: { boxWidth: 10, padding: 12, font: { size: 10 } } } },
+          scales: {
+            x: { grid: { color: '#1f2630', drawBorder: false }, ticks: { maxTicksLimit: 8, font: { size: 9 } } },
+            y: { grid: { color: '#1f2630', drawBorder: false }, ticks: { callback: v => v + 'W', font: { size: 9 } }, beginAtZero: true },
+          },
+        },
+      });
+
+      const e = data.energy;
+      new Chart(document.getElementById('energyPie').getContext('2d'), {
+        type: 'doughnut',
+        data: {
+          labels: [`GPU ${e.gpu_wh}`, `CPU ${e.cpu_wh}`, `Cooling ${e.cooling_wh}`],
+          datasets: [{ data: [e.gpu_wh, e.cpu_wh, e.cooling_wh], backgroundColor: ['#4fd1c5', '#58a6ff', '#2a3340'], borderColor: '#11161d', borderWidth: 2 }],
+        },
+        options: { cutout: '60%', plugins: { legend: { position: 'bottom', labels: { boxWidth: 8, padding: 8, font: { size: 9.5 } } } } },
+      });
+
+      const regions = data.regional;
+      new Chart(document.getElementById('waterBreakdownChart').getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: regions.map(r => r.chart_label),
+          datasets: [
+            { label: 'Direct cooling water (mL)', data: regions.map(r => r.direct_ml), backgroundColor: '#58a6ff', borderRadius: 2, stack: 'water' },
+            { label: 'Indirect generation water (mL)', data: regions.map(r => r.indirect_ml), backgroundColor: '#4fd1c5', borderRadius: 2, stack: 'water' },
+          ],
+        },
+        options: {
+          indexAxis: 'y',
+          plugins: {
+            legend: { position: 'top', align: 'end', labels: { boxWidth: 10, padding: 12, font: { size: 10.5 } } },
+            tooltip: {
+              callbacks: {
+                label: ctx => `${ctx.dataset.label}: ${ctx.parsed.x.toFixed(1)} mL`,
+                footer: items => `Total: ${items.reduce((s, i) => s + i.parsed.x, 0).toFixed(1)} mL`,
+              },
+            },
+          },
+          scales: {
+            x: { stacked: true, grid: { color: '#1f2630' }, ticks: { callback: v => v + ' mL', font: { size: 10 } } },
+            y: { stacked: true, grid: { display: false }, ticks: { font: { size: 11 } } },
+          },
+        },
+      });
+
+      new Chart(document.getElementById('tradeoffChart').getContext('2d'), {
+        type: 'bar',
+        data: {
+          labels: regions.map(r => r.chart_label),
+          datasets: [
+            { label: 'Carbon (g CO₂e)', data: regions.map(r => r.carbon_g), backgroundColor: '#58a6ff', borderRadius: 2, yAxisID: 'y' },
+            { label: 'Water (mL)', data: regions.map(r => r.water_ml), backgroundColor: '#4fd1c5', borderRadius: 2, yAxisID: 'y1' },
+          ],
+        },
+        options: {
+          plugins: { legend: { position: 'top', align: 'end', labels: { boxWidth: 10, padding: 12, font: { size: 10 } } } },
+          scales: {
+            x: { grid: { display: false }, ticks: { font: { size: 10 } } },
+            y: { type: 'linear', position: 'left', grid: { color: '#1f2630' }, ticks: { callback: v => v + 'g', font: { size: 9 } }, title: { display: true, text: 'CARBON', color: '#58a6ff', font: { size: 9, weight: 600 } } },
+            y1: { type: 'linear', position: 'right', grid: { display: false }, ticks: { callback: v => v + 'mL', font: { size: 9 } }, title: { display: true, text: 'WATER', color: '#4fd1c5', font: { size: 9, weight: 600 } } },
+          },
+        },
+      });
+    }
+
+    function animateNumber(el) {
+      const target = parseFloat(el.dataset.target);
+      const decimals = parseInt(el.dataset.decimals || '0', 10);
+      const prefix = el.dataset.prefix || '';
+      const duration = 850;
+      const start = performance.now();
+      function frame(now) {
+        const t = Math.min((now - start) / duration, 1);
+        const eased = 1 - Math.pow(1 - t, 3);
+        const value = target * eased;
+        el.textContent = prefix + value.toFixed(decimals);
+        if (t < 1) requestAnimationFrame(frame);
+        else el.textContent = prefix + target.toFixed(decimals);
+      }
+      requestAnimationFrame(frame);
+    }
+
+    function runCounters() {
+      document.querySelectorAll('.num[data-target]').forEach(animateNumber);
+    }
+
+    function renderScope(data) {
+      const scope = data.scope || {};
+      const whyEl = document.getElementById('scopeEmbodiedWhy');
+      if (!whyEl) return;
+      if (scope.embodied_status === 'modeled') {
+        const life = scope.embodied_useful_life_hours
+          ? `${Math.round(scope.embodied_useful_life_hours / 8760)} yr useful life`
+          : 'useful life';
+        whyEl.textContent = `Modeled (amortized over ${life}) · ${scope.embodied_citation || scope.embodied_sku || 'published LCA'}`;
+        whyEl.classList.add('modeled');
+      } else if (scope.embodied_status === 'no_profile') {
+        whyEl.textContent = 'Not computed — unknown hardware SKU (no_profile)';
+        whyEl.classList.remove('modeled');
+      } else {
+        whyEl.textContent = 'Not computed — pass --hardware-sku or recognizable --hardware label';
+        whyEl.classList.remove('modeled');
+      }
+    }
+
+    function renderScaleContext(data) {
+      const sc = data.scale_context || {};
+      const grid = document.getElementById('scaleContextGrid');
+      const caveat = document.getElementById('scaleContextCaveat');
+      if (!grid) return;
+      const cards = sc.cards || [];
+      grid.innerHTML = cards.map(card => `
+        <div class="scale-card" data-method="${(card.method || '').replace(/"/g, '&quot;')}">
+          <div class="scale-headline">${card.headline || ''}</div>
+          <div class="scale-footnote">${card.footnote || ''}</div>
+          <div class="method-tip">
+            <div class="tip-label">How this was derived</div>
+            <div class="tip-formula">${card.formula || ''}</div>
+            <div class="tip-source">${card.footnote || ''}</div>
+          </div>
+        </div>
+      `).join('');
+      if (caveat) caveat.textContent = sc.caveat || '';
+    }
+
+    function initDashboard(data) {
+      const primary = data.primary || data;
+      const comparison = data.comparison || null;
+      const warnings = [...(primary.warnings || [])];
+      if (comparison?.warnings?.length) {
+        comparison.warnings.forEach(w => {
+          if (!warnings.some(x => x.title === w.title && x.message === w.message)) {
+            warnings.push(w);
+          }
+        });
+      }
+      renderWarnings({ ...primary, warnings });
+      renderHeader(primary);
+      setupKpiToggle(primary);
+      renderKpis(primary);
+      renderRunComparison(primary, comparison);
+      renderScope(primary);
+      renderRegionalIntro(primary);
+      renderRegional(primary);
+      renderScaleContext(primary);
+      renderSidebar(primary);
+      buildCharts(primary);
+      requestAnimationFrame(() => requestAnimationFrame(runCounters));
+    }
+
+    const sectionNav = document.getElementById('sectionNav');
+    const showNavThreshold = 130;
+    window.addEventListener('scroll', () => {
+      if (window.scrollY > showNavThreshold) sectionNav.classList.add('visible');
+      else sectionNav.classList.remove('visible');
+    }, { passive: true });
+
+    const toast = document.getElementById('toast');
+    const toastMsg = toast.querySelector('.toast-msg');
+    let toastTimer = null;
+    function showToast(message) {
+      toastMsg.textContent = message;
+      toast.classList.add('visible');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('visible'), 2600);
+    }
+
+    document.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.action;
+        if (action === 'export') {
+          showToast('Preparing PDF — opening print dialog');
+          setTimeout(() => window.print(), 600);
+        } else if (action === 'share') {
+          const url = window.location.href;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(
+              () => showToast('Dashboard link copied to clipboard'),
+              () => showToast('Copy failed — ' + url)
+            );
+          } else {
+            showToast('Copy URL: ' + url);
+          }
+        }
+      });
+    });
+
+    document.getElementById('brandHome')?.addEventListener('click', () => {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+
+    document.getElementById('hdrUtc')?.addEventListener('click', () => {
+      hdrTimeIsUtc = !hdrTimeIsUtc;
+      renderHdrRunTime();
+    });
+
+    const refreshEl = document.getElementById('refreshTime');
+    const pageLoaded = Date.now();
+    function updateRefreshLabel() {
+      const seconds = Math.floor((Date.now() - pageLoaded) / 1000);
+      if (seconds < 30) refreshEl.textContent = 'just now';
+      else if (seconds < 90) refreshEl.textContent = '1 min ago';
+      else refreshEl.textContent = Math.floor(seconds / 60) + ' min ago';
+    }
+    updateRefreshLabel();
+    setInterval(updateRefreshLabel, 15000);
+
+    initDashboard(DATA);
+
+    window.__watermarkTestHooks = {
+      buildImpactKpiCards,
+      countImpactKpiRows,
+      renderKpis,
+      setupKpiToggle,
+      getKpiView: () => kpiView,
+      setKpiView: (view) => { kpiView = view; saveKpiView(view); },
+      KPI_VIEW_STORAGE_KEY,
+    };
+  </script>
+</body>
+</html>

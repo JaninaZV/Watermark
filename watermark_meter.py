@@ -1,0 +1,1470 @@
+#!/usr/bin/env python3
+"""
+watermark_meter.py
+==================
+
+Workload-level energy, carbon, and water meter for AI / compute workloads.
+
+What this measures (when possible):
+  - CPU package energy via Intel/AMD RAPL counters (Linux bare metal)
+  - GPU power via NVIDIA NVML (pynvml) or nvidia-smi fallback
+
+What this models (because real measurement isn't available):
+  - Cooling/facility overhead via PUE
+  - Grid carbon intensity (kgCO2e/kWh), looked up by region with cited sources
+  - Water consumption (L/kWh), split into:
+      * Direct cooling water (WUE), vendor-published
+      * Indirect generation water, NREL/USGS thermoelectric averages
+
+The goal is to produce numbers a reviewer can audit, not numbers that look
+authoritative. Every assumption is recorded in the output summary.
+
+Outputs (written to --output dir):
+  - measurements.csv : per-sample readings
+  - summary.json     : aggregated totals + all assumptions used
+  - report.md        : human-readable summary
+
+Usage:
+  Standalone, measure for 60 seconds:
+    python watermark_meter.py --duration 60 --region us-east-1 --output ./run1
+
+  Wrap a command (measure while it runs):
+    python watermark_meter.py --region eu-west-1 --output ./run1 -- python train.py
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import datetime as dt
+import json
+import os
+import platform
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Protocol, runtime_checkable
+
+
+# ---------------------------------------------------------------------------
+# Methodology constants (with citations in comments)
+# ---------------------------------------------------------------------------
+
+# Power Usage Effectiveness: total facility energy / IT energy.
+# IEA "Electricity 2024" report, global data centre weighted average ~1.5-1.58.
+DEFAULT_PUE = 1.58
+
+# Direct Water Usage Effectiveness: liters of on-site water per kWh of IT energy.
+# Per-region values live in REGION_PROFILES (AWS 2024 sustainability report, etc.).
+# DEFAULT_WUE_DIRECT is the global-avg fallback when --wue is not overridden.
+DEFAULT_WUE_DIRECT = 0.15  # AWS global WUE 2024 (sustainability.aboutamazon.com/products-services/aws-cloud)
+
+# WRI Aqueduct Baseline Water Stress — stress weighting metadata version.
+STRESS_SOURCE_DEFAULT = "wri_aqueduct_2023"
+WATER_STRESS_WEIGHTING_METHOD = "multiplier_1_plus_score, see methodology"
+
+# Per-region grid intensities and direct cooling WUE.
+#   co2_kg_per_kwh : annual average operating CO2e intensity
+#       sources: EPA eGRID 2022 (US subregions); IEA 2024 country averages (intl).
+#   water_l_per_kwh : indirect water consumed in electricity generation
+#       sources: NREL Macknick et al. 2012 + USGS thermoelectric water use 2020
+#   wue_direct_l_per_kwh : direct cooling water per kWh IT (vendor-published where available)
+#       sources: AWS 2024 Sustainability Report regional WUE table (primary);
+#       climate_estimate where AWS reports N/A for that region.
+REGION_PROFILES = {
+    # WRI Aqueduct 2023 BWS: low–medium; basin ~Northern Virginia / Lower Chesapeake.
+    "us-east-1": {
+        "label": "US Virginia (PJM Mid-Atlantic)",
+        "co2_kg_per_kwh": 0.35,
+        "water_l_per_kwh": 1.90,
+        "wue_direct_l_per_kwh": 0.12,
+        "wue_source": "aws_2024_virginia",
+        "water_stress_score": 0.25,
+        "water_stress_level": "low-medium",
+        "water_stress_basin": "Lower Chesapeake",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # WRI Aqueduct 2023 BWS: low–medium; Ohio River basin.
+    "us-east-2": {
+        "label": "US Ohio (RFC East)",
+        "co2_kg_per_kwh": 0.43,
+        "water_l_per_kwh": 1.80,
+        "wue_direct_l_per_kwh": 0.10,
+        "wue_source": "aws_2024_ohio",
+        "water_stress_score": 0.25,
+        "water_stress_level": "low-medium",
+        "water_stress_basin": "Ohio River",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # WRI Aqueduct 2023 BWS: high; Sacramento–San Joaquin basin.
+    "us-west-1": {
+        "label": "US N. California (CAISO)",
+        "co2_kg_per_kwh": 0.20,
+        "water_l_per_kwh": 1.50,
+        "wue_direct_l_per_kwh": 0.51,
+        "wue_source": "aws_2024_n_california",
+        "water_stress_score": 0.85,
+        "water_stress_level": "high",
+        "water_stress_basin": "Sacramento-San Joaquin",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # WRI Aqueduct 2023 BWS: low; Columbia River basin.
+    "us-west-2": {
+        "label": "US Oregon (NWPP)",
+        "co2_kg_per_kwh": 0.11,
+        "water_l_per_kwh": 4.20,
+        "wue_direct_l_per_kwh": 0.16,
+        "wue_source": "aws_2024_oregon",
+        "water_stress_score": 0.0,
+        "water_stress_level": "low",
+        "water_stress_basin": "Columbia River",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # WRI Aqueduct 2023 BWS: low; Eastern Ireland / Shannon catchment.
+    "eu-west-1": {
+        "label": "Ireland",
+        "co2_kg_per_kwh": 0.30,
+        "water_l_per_kwh": 0.80,
+        "wue_direct_l_per_kwh": 0.03,
+        "wue_source": "aws_2024_ireland",
+        "water_stress_score": 0.0,
+        "water_stress_level": "low",
+        "water_stress_basin": "Shannon",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # AWS has no Paris-region WUE in the 2024 table; temperate Western Europe estimate.
+    # WRI Aqueduct 2023 BWS: medium; Seine basin.
+    "eu-west-3": {
+        "label": "France",
+        "co2_kg_per_kwh": 0.06,
+        "water_l_per_kwh": 2.50,
+        "wue_direct_l_per_kwh": 0.10,
+        "wue_source": "climate_estimate",
+        "water_stress_score": 0.5,
+        "water_stress_level": "medium",
+        "water_stress_basin": "Seine",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # WRI Aqueduct 2023 BWS: low–medium; Lake Mälaren basin.
+    "eu-north-1": {
+        "label": "Sweden",
+        "co2_kg_per_kwh": 0.04,
+        "water_l_per_kwh": 5.00,
+        "wue_direct_l_per_kwh": 0.02,
+        "wue_source": "aws_2024_stockholm",
+        "water_stress_score": 0.25,
+        "water_stress_level": "low-medium",
+        "water_stress_basin": "Lake Mälaren",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # WRI Aqueduct 2023 BWS: medium; Main River basin.
+    "eu-central-1": {
+        "label": "Germany (Frankfurt)",
+        "co2_kg_per_kwh": 0.38,
+        "water_l_per_kwh": 1.20,
+        "wue_direct_l_per_kwh": 0.01,
+        "wue_source": "aws_2024_frankfurt",
+        "water_stress_score": 0.5,
+        "water_stress_level": "medium",
+        "water_stress_basin": "Main",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # WRI Aqueduct 2023 BWS: medium; Tone River basin.
+    "ap-northeast-1": {
+        "label": "Japan (Tokyo)",
+        "co2_kg_per_kwh": 0.45,
+        "water_l_per_kwh": 1.00,
+        "wue_direct_l_per_kwh": 0.91,
+        "wue_source": "aws_2024_tokyo",
+        "water_stress_score": 0.5,
+        "water_stress_level": "medium",
+        "water_stress_basin": "Tone River",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # AWS Asia-Pacific (Mumbai) WUE N/A in 2024 report; hot-humid climate estimate.
+    # WRI Aqueduct 2023 BWS: extremely high; Krishna basin (Western India).
+    "ap-south-1": {
+        "label": "India (Mumbai)",
+        "co2_kg_per_kwh": 0.71,
+        "water_l_per_kwh": 2.30,
+        "wue_direct_l_per_kwh": 1.40,
+        "wue_source": "climate_estimate",
+        "water_stress_score": 1.0,
+        "water_stress_level": "extremely-high",
+        "water_stress_basin": "Krishna",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # WRI Aqueduct 2023 BWS: high; Singapore–Johor coastal basin.
+    "ap-southeast-1": {
+        "label": "Singapore",
+        "co2_kg_per_kwh": 0.41,
+        "water_l_per_kwh": 1.10,
+        "wue_direct_l_per_kwh": 1.68,
+        "wue_source": "aws_2024_singapore",
+        "water_stress_score": 0.85,
+        "water_stress_level": "high",
+        "water_stress_basin": "Singapore-Johor",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # Multi-basin global average; medium stress as conservative default.
+    "global-avg": {
+        "label": "Global average (IEA 2024)",
+        "co2_kg_per_kwh": 0.48,
+        "water_l_per_kwh": 1.80,
+        "wue_direct_l_per_kwh": 0.15,
+        "wue_source": "aws_2024_global",
+        "water_stress_score": 0.5,
+        "water_stress_level": "medium",
+        "water_stress_basin": "Global multi-basin average",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+}
+
+# ElectricityMaps API v0.2 — https://static.electricitymap.org/api/docs/
+# Zone list (no auth): https://api.electricitymap.org/v3/zones; auth returns entitled zones only.
+EM_API_BASE = "https://api.electricitymap.org/v3/carbon-intensity/latest"
+EM_ZONES_API = "https://api.electricitymap.org/v3/zones"
+CARBON_SOURCE_STATIC = "static_avg"
+CARBON_SOURCE_EM = "em_realtime"
+
+# Watermark region → Electricity Maps zoneKey (validated against /v3/zones).
+EM_ZONE_MAP = {
+    "us-east-1":      "US-MIDA-PJM",   # PJM Mid-Atlantic (Virginia)
+    "us-east-2":      "US-MIDW-MISO",  # Midcontinent ISO (Ohio)
+    "us-west-1":      "US-CAL-CISO",   # California ISO
+    "us-west-2":      "US-NW-PACW",    # PacifiCorp West (Oregon)
+    "eu-west-1":      "IE",            # Ireland
+    "eu-west-3":      "FR",            # France
+    "eu-north-1":     "SE",            # Sweden
+    "eu-central-1":   "DE",            # Germany (Frankfurt)
+    "ap-northeast-1": "JP-TK",         # Japan — Tōkyō
+    "ap-south-1":     "IN-WE",         # India — Western (Mumbai)
+    "ap-southeast-1": "SG",            # Singapore
+}
+
+_GRID_PROFILE_CACHE: dict[tuple, dict] = {}
+
+# Impact dimension registry — documents energy basis for each output (v0.3+ extensible).
+IMPACT_DIMENSIONS = {
+    "operational_energy": {"unit": "kwh", "basis": "facility"},
+    "operational_carbon": {"unit": "kgco2e", "basis": "facility"},
+    "operational_water_direct": {"unit": "l", "basis": "it"},
+    "operational_water_indirect": {"unit": "l", "basis": "facility"},
+    "embodied_carbon": {"unit": "kgco2e", "basis": "hardware_amortized"},
+    "embodied_water": {"unit": "l", "basis": "hardware_amortized"},
+}
+
+# Default useful life for amortization (5 years × 8760 h).
+GPU_USEFUL_LIFE_HOURS = 43800
+SERVER_USEFUL_LIFE_HOURS = 87600
+
+# Embodied (cradle-to-gate) manufacturing impacts per hardware SKU.
+# Amortized linearly over useful_life_hours for each run.
+HARDWARE_PROFILES = {
+    # NVIDIA HGX H100 PCF Summary (ISO 14067, third-party reviewed by WSP, FY25):
+    #   1,312 kg CO2e cradle-to-gate for the 8-GPU HGX H100 baseboard.
+    #   Per-GPU allocation: 1312 / 8 = 164 kg CO2e (compute-only SXM module share).
+    #   https://images.nvidia.com/aem-dam/Solutions/documents/HGX-H100-PCF-Summary.pdf
+    # Water: no NVIDIA chip-level freshwater PCF; TSMC advanced-fab intensity proxy
+    #   (Wang et al. 2023 Water Cycle 4:47-54; scaled for 5nm vs A100 7nm).
+    "h100-sxm": {
+        "label": "NVIDIA H100 SXM",
+        "embodied_co2e_kg": 164.0,
+        "embodied_water_l": 2800.0,
+        "useful_life_hours": GPU_USEFUL_LIFE_HOURS,
+        "citation": "NVIDIA HGX H100 PCF Summary 2025 (ISO 14067); water TSMC fab proxy",
+    },
+    # Bouzar et al., "More than Carbon" (arXiv:2509.00093) — primary-data cradle-to-gate
+    #   for a single NVIDIA A100 SXM 40GB GPU: 127.6 kg CO2e.
+    # Water: manufacturing freshwater midpoint from same study; TSMC fab where unavailable.
+    "a100": {
+        "label": "NVIDIA A100 SXM 40GB",
+        "embodied_co2e_kg": 127.6,
+        "embodied_water_l": 2200.0,
+        "useful_life_hours": GPU_USEFUL_LIFE_HOURS,
+        "citation": "Bouzar et al. arXiv:2509.00093 cradle-to-gate A100 LCA",
+    },
+    # Dell PowerEdge-class 2U rack server — cradle-to-gate manufacturing share.
+    #   Dell PowerEdge R640 PAIA PCF ~7,730 kg CO2e lifetime (Jan 2019); manufacturing
+    #   ~10-12% of total ≈ 850 kg CO2e cradle-to-gate for CPU/RAM/mainboard assembly.
+    #   https://i.dell.com/sites/csdocuments/corpcomm_docs/en/carbon-footprint-poweredge-r640.pdf
+    # Water: enterprise server manufacturing proxy (HP/Dell LCA databases; fab + assembly).
+    "generic-2u": {
+        "label": "Generic 2U rack server",
+        "embodied_co2e_kg": 850.0,
+        "embodied_water_l": 12000.0,
+        "useful_life_hours": SERVER_USEFUL_LIFE_HOURS,
+        "citation": "Dell PowerEdge R640 PAIA PCF manufacturing-stage allocation",
+    },
+    # Conservative GPU average when SKU unknown but embodied requested explicitly.
+    #   Luccioni et al. FAccT 2023 uses ~150 kg CO2e/card for A100-class accelerators.
+    "default-gpu": {
+        "label": "Generic GPU accelerator (conservative average)",
+        "embodied_co2e_kg": 150.0,
+        "embodied_water_l": 2000.0,
+        "useful_life_hours": GPU_USEFUL_LIFE_HOURS,
+        "citation": "Luccioni et al. FAccT 2023 embodied GPU estimate; ICT hardware LCA average",
+    },
+}
+
+# Substrings matched against --hardware / --workload-name for auto SKU selection.
+_HARDWARE_SKU_ALIASES: dict[str, tuple[str, ...]] = {
+    "h100-sxm": ("h100 sxm", "h100-sxm", "hgx h100", "h100 80gb", "h100"),
+    "a100": ("a100 sxm", "a100 80gb", "a100 40gb", "a100"),
+    "generic-2u": ("generic-2u", "generic 2u", "poweredge", "proliant", "2u server", "rack server"),
+}
+
+
+def resolve_hardware_sku(
+    hardware_sku: str | None,
+    hardware_label: str | None = None,
+) -> str | None:
+    """Resolve SKU from --hardware-sku or recognizable --hardware text."""
+    if hardware_sku:
+        canonical = _normalize_hardware_sku(hardware_sku)
+        if canonical in HARDWARE_PROFILES:
+            return canonical
+        return None
+    if not hardware_label:
+        return None
+    label = hardware_label.lower()
+    for sku, tokens in _HARDWARE_SKU_ALIASES.items():
+        if any(token in label for token in tokens):
+            return sku
+    return None
+
+
+def _normalize_hardware_sku(sku: str) -> str:
+    """Map CLI aliases (e.g. generic) to profile keys."""
+    key = sku.strip().lower()
+    if key == "generic":
+        return "generic-2u"
+    return key
+
+
+def compute_embodied_impacts(
+    duration_s: float,
+    hardware_sku: str | None,
+    requested_sku: str | None = None,
+) -> dict:
+    """
+    Amortize cradle-to-gate manufacturing CO2e and water over useful life.
+
+    embodied_for_run = embodied_total * (duration_s / 3600) / useful_life_hours
+    """
+    sku_display = hardware_sku or requested_sku
+    if not hardware_sku or hardware_sku not in HARDWARE_PROFILES:
+        return {
+            "co2e_kg": 0.0,
+            "water_l": 0.0,
+            "sku": sku_display,
+            "useful_life_hours": None,
+            "source": "no_profile",
+            "citation": None,
+            "label": None,
+        }
+
+    profile = HARDWARE_PROFILES[hardware_sku]
+    duration_h = max(duration_s, 0.0) / 3600.0
+    life_h = profile["useful_life_hours"]
+    share = duration_h / life_h if life_h > 0 else 0.0
+    return {
+        "co2e_kg": round(profile["embodied_co2e_kg"] * share, 8),
+        "water_l": round(profile["embodied_water_l"] * share, 8),
+        "sku": hardware_sku,
+        "useful_life_hours": life_h,
+        "source": "modeled",
+        "citation": profile["citation"],
+        "label": profile["label"],
+        "embodied_co2e_kg_total": profile["embodied_co2e_kg"],
+        "embodied_water_l_total": profile["embodied_water_l"],
+    }
+
+
+def static_grid_profile(region: str) -> dict:
+    """Annual-average regional grid profile (modeled)."""
+    if region not in REGION_PROFILES:
+        raise ValueError(f"Unknown region: {region}")
+    profile = REGION_PROFILES[region].copy()
+    profile["carbon_source"] = CARBON_SOURCE_STATIC
+    profile["water_source"] = CARBON_SOURCE_STATIC
+    profile["source"] = CARBON_SOURCE_STATIC
+    profile["timestamp"] = None
+    profile["em_zone"] = None
+    return profile
+
+
+def _grid_warn(message: str) -> None:
+    print(f"[watermark] warning: {message}", file=sys.stderr)
+
+
+def fetch_em_zone_keys() -> set[str]:
+    """Return all valid Electricity Maps zoneKey values from /v3/zones (no auth)."""
+    req = urllib.request.Request(EM_ZONES_API, headers={"Accept": "application/json"}, method="GET")
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if isinstance(payload, dict):
+        return set(payload.keys())
+    raise ValueError("unexpected /v3/zones response shape")
+
+
+def fetch_em_entitled_zone_keys(api_key: str) -> set[str]:
+    """Return zone keys the API key is entitled to access (auth required)."""
+    req = urllib.request.Request(
+        EM_ZONES_API,
+        headers={"auth-token": api_key, "Accept": "application/json"},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if isinstance(payload, dict):
+        return set(payload.keys())
+    raise ValueError("unexpected authenticated /v3/zones response shape")
+
+
+def invalid_em_zone_map_entries(valid_zones: set[str] | None = None) -> list[tuple[str, str]]:
+    """Return (region, zoneKey) pairs not present in the live zone list."""
+    zones = valid_zones if valid_zones is not None else fetch_em_zone_keys()
+    return [(region, zone) for region, zone in EM_ZONE_MAP.items() if zone not in zones]
+
+
+def _format_em_datetime(at: dt.datetime) -> str:
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=dt.timezone.utc)
+    return at.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _em_http_error_detail(exc: urllib.error.HTTPError) -> str:
+    body = ""
+    if exc.fp is not None:
+        try:
+            body = exc.fp.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            pass
+    if body:
+        return f"HTTP {exc.code}: {body}"
+    return f"HTTP {exc.code}: {exc.reason}"
+
+
+def _em_request(api_key: str, params: dict) -> dict:
+    url = f"{EM_API_BASE}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(
+        url,
+        headers={"auth-token": api_key, "Accept": "application/json"},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _parse_em_carbon_response(payload: dict) -> tuple[float, str | None, str | None]:
+    """Parse EM response; carbonIntensity is gCO2eq/kWh — convert to kg/kWh."""
+    intensity = payload.get("carbonIntensity")
+    if isinstance(intensity, (int, float)):
+        return intensity / 1000.0, payload.get("datetime"), payload.get("zone")
+
+    data = payload.get("data")
+    if isinstance(data, list) and data:
+        entry = data[0]
+        intensity = entry.get("carbonIntensity")
+        if isinstance(intensity, (int, float)):
+            return (
+                intensity / 1000.0,
+                entry.get("datetime") or payload.get("datetime"),
+                entry.get("zone") or payload.get("zone"),
+            )
+
+    raise ValueError("ElectricityMaps response missing carbonIntensity")
+
+
+def _electricitymaps_entitlement_hint(api_key: str, zone_key: str) -> str:
+    try:
+        entitled = fetch_em_entitled_zone_keys(api_key)
+    except Exception:
+        return ""
+    if not entitled:
+        return ""
+    if zone_key in entitled:
+        return ""
+    preview = ", ".join(sorted(entitled)[:5])
+    suffix = "..." if len(entitled) > 5 else ""
+    return (
+        f" API key is entitled to zone(s): {preview}{suffix}. "
+        f"Free-tier keys are limited to one zone — set it in the Electricity Maps portal "
+        f"to {zone_key} or upgrade your plan."
+    )
+
+
+def _electricitymaps_carbon_at(api_key: str, region: str, at: dt.datetime) -> tuple[float, str | None, str | None]:
+    """
+    Fetch latest carbon intensity for a watermark region via Electricity Maps v3 zone API.
+    """
+    _ = at  # run start time recorded in profile cache key; /latest needs zone only
+    em_zone = EM_ZONE_MAP.get(region)
+    if not em_zone:
+        raise RuntimeError(f"no ElectricityMaps zone mapping for region {region}")
+
+    params = {"zone": em_zone}
+    try:
+        payload = _em_request(api_key, params)
+        co2, ts, zone = _parse_em_carbon_response(payload)
+        return co2, ts, zone or em_zone
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, json.JSONDecodeError) as exc:
+        last_error = exc
+
+    hint = ""
+    if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 403:
+        hint = _electricitymaps_entitlement_hint(api_key, em_zone)
+
+    detail = _em_http_error_detail(last_error) if isinstance(last_error, urllib.error.HTTPError) else str(last_error)
+    raise RuntimeError(
+        f"ElectricityMaps lookup failed for {region} (zone {em_zone}): {detail}.{hint}"
+    )
+
+
+def _fetch_grid_profile_electricitymaps(region: str, at: dt.datetime) -> dict:
+    """Fetch real-time carbon from ElectricityMaps; fall back to static on any failure."""
+    profile = static_grid_profile(region)
+
+    if region == "global-avg":
+        _grid_warn("ElectricityMaps has no data-center mapping for global-avg; using static_avg carbon")
+        return profile
+
+    api_key = os.environ.get("ELECTRICITYMAPS_API_KEY", "").strip()
+    if not api_key:
+        _grid_warn("ELECTRICITYMAPS_API_KEY not set; falling back to static_avg carbon")
+        return profile
+
+    try:
+        co2_kg_per_kwh, timestamp, em_zone = _electricitymaps_carbon_at(api_key, region, at)
+        profile["co2_kg_per_kwh"] = co2_kg_per_kwh
+        profile["carbon_source"] = CARBON_SOURCE_EM
+        profile["source"] = CARBON_SOURCE_EM
+        profile["timestamp"] = timestamp
+        profile["em_zone"] = em_zone
+    except Exception as exc:
+        _grid_warn(f"ElectricityMaps API failed ({exc}); falling back to static_avg carbon")
+
+    return profile
+
+
+def fetch_grid_profile(region: str, at: dt.datetime | None = None,
+                       grid_source: str = "static") -> dict:
+    """
+    Load grid profile for carbon/water modeling. One API call per run when
+    grid_source is 'electricitymaps'; result is cached for the run.
+    """
+    if region not in REGION_PROFILES:
+        raise ValueError(f"Unknown region: {region}")
+
+    at = at or dt.datetime.now(dt.timezone.utc)
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=dt.timezone.utc)
+    cache_key = (grid_source, region, _format_em_datetime(at))
+    if cache_key in _GRID_PROFILE_CACHE:
+        return _GRID_PROFILE_CACHE[cache_key].copy()
+
+    if grid_source == "static":
+        profile = static_grid_profile(region)
+    elif grid_source == "electricitymaps":
+        profile = _fetch_grid_profile_electricitymaps(region, at)
+    else:
+        raise ValueError(f"Unknown grid_source: {grid_source}")
+
+    _GRID_PROFILE_CACHE[cache_key] = profile
+    return profile.copy()
+
+
+def stress_badge_label(stress_level: str | None) -> str:
+    """Human-readable badge for dashboard regional cards."""
+    labels = {
+        "low": "LOW STRESS",
+        "low-medium": "LOW–MEDIUM STRESS",
+        "medium": "MEDIUM STRESS",
+        "medium-high": "MEDIUM–HIGH STRESS",
+        "high": "HIGH STRESS",
+        "extremely-high": "EXTREME STRESS",
+    }
+    if not stress_level:
+        return "UNKNOWN STRESS"
+    return labels.get(stress_level, stress_level.upper().replace("-", " ") + " STRESS")
+
+
+def apply_water_stress_weighting(water: dict, profile: dict) -> dict:
+    """
+    Apply modest watershed-stress multiplier to gross water total.
+
+    stress_weighted_total_l = total_l × (1 + stress_score)
+    stress_score maps 0.0 (low) … 1.0 (extremely high) from WRI Aqueduct BWS.
+    """
+    stress_score = profile.get("water_stress_score", 0.0)
+    total_l = water["total_l"]
+    return {
+        **water,
+        "stress_score": stress_score,
+        "stress_level": profile.get("water_stress_level"),
+        "stress_basin": profile.get("water_stress_basin"),
+        "stress_source": profile.get("stress_source", STRESS_SOURCE_DEFAULT),
+        "stress_weighted_total_l": round(total_l * (1 + stress_score), 6),
+        "weighting_methodology": WATER_STRESS_WEIGHTING_METHOD,
+    }
+
+
+def compute_impacts(it_kwh: float, facility_kwh: float, profile: dict,
+                    wue_direct: float) -> dict:
+    """Pure aggregation of IT/facility energy into carbon and water impacts."""
+    carbon_source = profile.get("carbon_source", CARBON_SOURCE_STATIC)
+    water_source = profile.get("water_source", CARBON_SOURCE_STATIC)
+    water_direct_l = it_kwh * wue_direct
+    water_indirect_l = facility_kwh * profile["water_l_per_kwh"]
+    water = apply_water_stress_weighting({
+        "direct_cooling_l": water_direct_l,
+        "indirect_generation_l": water_indirect_l,
+        "total_l": water_direct_l + water_indirect_l,
+        "direct_source": "modeled_wue",
+        "indirect_source": water_source,
+    }, profile)
+    return {
+        "energy": {
+            "it_total_kwh": it_kwh,
+            "facility_total_kwh": facility_kwh,
+            "facility_source": "pue_multiplier",
+        },
+        "carbon": {
+            "co2e_kg": facility_kwh * profile["co2_kg_per_kwh"],
+            "source": carbon_source,
+            "energy_basis_kwh": facility_kwh,
+        },
+        "water": water,
+    }
+
+
+def _parse_nvidia_smi_power(stdout: str) -> float | None:
+    """Parse nvidia-smi power.draw output, skipping [N/A] and malformed lines."""
+    total = 0.0
+    valid = 0
+    for line in stdout.strip().splitlines():
+        token = line.strip().split()[0] if line.strip() else ""
+        if not token or token.startswith("["):
+            continue
+        try:
+            total += float(token)
+            valid += 1
+        except ValueError:
+            continue
+    return total if valid else None
+
+
+# ---------------------------------------------------------------------------
+# Hardware probes
+# ---------------------------------------------------------------------------
+
+@runtime_checkable
+class EnergyProbe(Protocol):
+    """Minimal interface for v0.3 per-process attribution probes."""
+    name: str
+    available: bool
+
+    def read_watts(self, interval_s: float) -> float | None: ...
+    def shutdown(self) -> None: ...
+
+
+class RAPLProbe:
+    """
+    Reads CPU/package energy from the Linux RAPL sysfs interface.
+    Paths:
+      Intel: /sys/class/powercap/intel-rapl:N/energy_uj
+      AMD:   /sys/class/powercap/amd-rapl:N/energy_uj   (kernel 5.11+)
+
+    Returns watts averaged over the interval since the previous read.
+    Returns None if RAPL is not available (macOS, Windows, most cloud VMs).
+    """
+
+    name = "rapl"
+    _RAPL_GLOBS = ("intel-rapl:*", "amd-rapl:*")
+    _PACKAGE_NAMES = frozenset({"package", "package-0", "package-1"})
+
+    def __init__(self):
+        self.available = False
+        self.zones: list[dict] = []
+        self.platform: str | None = None
+        if platform.system() != "Linux":
+            return
+        rapl_root = Path("/sys/class/powercap")
+        if not rapl_root.exists():
+            return
+        for pattern in self._RAPL_GLOBS:
+            for zone in sorted(rapl_root.glob(pattern)):
+                if zone.name.count(":") != 1:
+                    continue
+                energy_file = zone / "energy_uj"
+                max_file = zone / "max_energy_range_uj"
+                name_file = zone / "name"
+                if not energy_file.exists() or not os.access(energy_file, os.R_OK):
+                    continue
+                try:
+                    zone_name = name_file.read_text().strip() if name_file.exists() else ""
+                    if zone_name and zone_name.lower() not in self._PACKAGE_NAMES:
+                        if not zone_name.lower().startswith("package"):
+                            continue
+                    max_uj = int(max_file.read_text().strip()) if max_file.exists() else None
+                    self.zones.append({"path": energy_file, "max_uj": max_uj, "last_uj": None})
+                    if self.platform is None:
+                        self.platform = "amd" if pattern.startswith("amd") else "intel"
+                except (OSError, ValueError):
+                    continue
+        self.available = len(self.zones) > 0
+
+    def read_watts(self, interval_s: float) -> float | None:
+        if not self.available or interval_s <= 0:
+            return None
+        total_delta_uj = 0.0
+        zones_read = 0
+        for zone in self.zones:
+            try:
+                current = int(zone["path"].read_text().strip())
+            except (OSError, ValueError):
+                continue
+            zones_read += 1
+            if zone["last_uj"] is not None:
+                delta = current - zone["last_uj"]
+                if delta < 0:
+                    if zone["max_uj"]:
+                        delta += zone["max_uj"]
+                    else:
+                        zone["last_uj"] = current
+                        return None
+                total_delta_uj += max(delta, 0)
+            zone["last_uj"] = current
+        if zones_read == 0:
+            return None
+        if total_delta_uj == 0 and all(z["last_uj"] is not None for z in self.zones):
+            return 0.0
+        if all(z["last_uj"] is None for z in self.zones):
+            return None
+        return (total_delta_uj / 1_000_000.0) / interval_s
+
+    def shutdown(self) -> None:
+        pass
+
+
+class NVMLProbe:
+    """
+    Reads GPU power via pynvml when available; falls back to invoking nvidia-smi.
+    Returns total watts across all visible NVIDIA GPUs, or None if no GPU.
+    """
+
+    name = "nvml"
+
+    def __init__(self):
+        self.available = False
+        self.mode: str | None = None
+        self.handles: list = []
+        self.pynvml = None
+        try:
+            import pynvml  # type: ignore
+            pynvml.nvmlInit()
+            count = pynvml.nvmlDeviceGetCount()
+            if count > 0:
+                self.pynvml = pynvml
+                self.handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(count)]
+                self.available = True
+                self.mode = "nvml_pynvml"
+                return
+        except Exception:
+            pass
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=2,
+            )
+            if result.returncode == 0 and _parse_nvidia_smi_power(result.stdout) is not None:
+                self.available = True
+                self.mode = "nvml_smi"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    def read_watts(self, interval_s: float = 0.0) -> float | None:
+        _ = interval_s
+        if not self.available:
+            return None
+        if self.mode == "nvml_pynvml":
+            try:
+                return sum(self.pynvml.nvmlDeviceGetPowerUsage(h) / 1000.0 for h in self.handles)
+            except Exception:
+                return None
+        if self.mode == "nvml_smi":
+            try:
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=power.draw", "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if result.returncode != 0:
+                    return None
+                return _parse_nvidia_smi_power(result.stdout)
+            except Exception:
+                return None
+        return None
+
+    def shutdown(self) -> None:
+        if self.pynvml:
+            try:
+                self.pynvml.nvmlShutdown()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Modeled fallback for CPU when RAPL is unavailable
+# ---------------------------------------------------------------------------
+
+def model_cpu_watts_from_util(cpu_percent: float, cpu_tdp_w: float = 65.0,
+                              idle_fraction: float = 0.30) -> float:
+    """
+    Approximate CPU power when no hardware counter is available.
+    Model:  idle_draw + (TDP - idle_draw) * (utilization)
+    This is acknowledged in the summary as 'modeled_from_util' so a reviewer
+    can see which numbers come from hardware and which come from a model.
+    """
+    idle_w = cpu_tdp_w * idle_fraction
+    return idle_w + (cpu_tdp_w - idle_w) * max(0.0, min(1.0, cpu_percent / 100.0))
+
+
+# ---------------------------------------------------------------------------
+# Meter
+# ---------------------------------------------------------------------------
+
+class Meter:
+    def __init__(self, region, pue, wue_direct, interval_s, cpu_tdp_fallback, output_dir,
+                 scope="host", scope_pid=None, pue_source="default_iea_2024",
+                 wue_source=None, grid_source="static",
+                 hardware_sku: str | None = None, hardware_sku_requested: str | None = None):
+        if scope != "host":
+            raise NotImplementedError("per-process attribution is v0.3 (eBPF/Kepler)")
+        if scope_pid is not None:
+            raise NotImplementedError("per-process attribution is v0.3 (eBPF/Kepler)")
+
+        self.region = region
+        self.grid_source = grid_source
+        self.profile = fetch_grid_profile(
+            region,
+            at=dt.datetime.now(dt.timezone.utc),
+            grid_source=grid_source,
+        )
+        self.pue = pue
+        self.pue_source = pue_source
+        if wue_direct is None:
+            self.wue_direct = self.profile["wue_direct_l_per_kwh"]
+            self.wue_source = wue_source or self.profile.get("wue_source", "region_default")
+        else:
+            self.wue_direct = wue_direct
+            self.wue_source = wue_source or "user_override"
+        self.interval_s = interval_s
+        self.cpu_tdp_fallback = cpu_tdp_fallback
+        self.hardware_sku = hardware_sku
+        self.hardware_sku_requested = hardware_sku_requested
+        self.scope = scope
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.rapl = RAPLProbe()
+        self.nvml = NVMLProbe()
+        if self.rapl.available:
+            self.rapl.read_watts(self.interval_s)
+
+        self.samples: list[dict] = []
+        self._stop = threading.Event()
+
+    def _sample_loop(self):
+        try:
+            import psutil  # type: ignore
+        except ImportError:
+            psutil = None
+
+        if psutil:
+            psutil.cpu_percent(interval=None)
+
+        last_tick = time.monotonic()
+        while not self._stop.is_set():
+            time.sleep(self.interval_s)
+            elapsed = time.monotonic() - last_tick
+            last_tick = time.monotonic()
+            ts = dt.datetime.now(dt.timezone.utc).isoformat()
+
+            cpu_watts = self.rapl.read_watts(elapsed) if self.rapl.available else None
+            cpu_source = "rapl_measured"
+            if cpu_watts is None:
+                util = psutil.cpu_percent(interval=None) if psutil else 0.0
+                cpu_watts = model_cpu_watts_from_util(util, self.cpu_tdp_fallback)
+                cpu_source = "modeled_from_util"
+
+            gpu_watts = self.nvml.read_watts(elapsed) if self.nvml.available else None
+            gpu_source = (self.nvml.mode if self.nvml.available else "no_gpu")
+
+            mem_pct = psutil.virtual_memory().percent if psutil else None
+            cpu_pct = psutil.cpu_percent(interval=None) if psutil else None
+
+            self.samples.append({
+                "timestamp": ts,
+                "interval_s": self.interval_s,
+                "elapsed_s": round(elapsed, 3),
+                "cpu_watts": round(cpu_watts, 3) if cpu_watts is not None else None,
+                "cpu_source": cpu_source,
+                "gpu_watts": round(gpu_watts, 3) if gpu_watts is not None else None,
+                "gpu_source": gpu_source,
+                "cpu_percent": cpu_pct,
+                "memory_percent": mem_pct,
+            })
+
+    def run_for(self, duration_s: float):
+        if duration_s <= 0:
+            raise ValueError(f"duration_s must be > 0, got {duration_s}")
+        thread = threading.Thread(target=self._sample_loop, daemon=True)
+        thread.start()
+        time.sleep(duration_s)
+        self._stop.set()
+        thread.join(timeout=self.interval_s * 2)
+
+    def run_command(self, cmd_argv):
+        thread = threading.Thread(target=self._sample_loop, daemon=True)
+        thread.start()
+        try:
+            proc = subprocess.Popen(cmd_argv)
+            rc = proc.wait()
+        except OSError as exc:
+            self._stop.set()
+            thread.join(timeout=self.interval_s * 2)
+            raise RuntimeError(f"failed to start command: {exc}") from exc
+        self._stop.set()
+        thread.join(timeout=self.interval_s * 2)
+        return rc
+
+    def aggregate(self):
+        if not self.samples:
+            raise RuntimeError(
+                "no samples collected; increase --duration or check that the workload ran long enough"
+            )
+
+        total_cpu_wh = 0.0
+        total_gpu_wh = 0.0
+        for s in self.samples:
+            dt_s = s.get("elapsed_s", s["interval_s"])
+            if s["cpu_watts"] is not None:
+                total_cpu_wh += s["cpu_watts"] * (dt_s / 3600.0)
+            if s["gpu_watts"] is not None:
+                total_gpu_wh += s["gpu_watts"] * (dt_s / 3600.0)
+
+        it_kwh = (total_cpu_wh + total_gpu_wh) / 1000.0
+        facility_kwh = it_kwh * self.pue
+        impacts = compute_impacts(it_kwh, facility_kwh, self.profile, self.wue_direct)
+        duration_s = round(sum(s.get("elapsed_s", s["interval_s"]) for s in self.samples), 3)
+        embodied = compute_embodied_impacts(
+            duration_s, self.hardware_sku, self.hardware_sku_requested,
+        )
+
+        cpu_sources = sorted({s["cpu_source"] for s in self.samples})
+        gpu_sources = sorted({s["gpu_source"] for s in self.samples if s["gpu_watts"] is not None})
+        cpu_modeled = sum(1 for s in self.samples if s["cpu_source"] == "modeled_from_util")
+
+        caveats = [
+            "CPU energy measured only when Intel/AMD RAPL is accessible (most Linux bare metal). "
+            "Cloud VMs typically block RAPL; on those hosts CPU watts are modeled from utilization.",
+            "GPU energy measured only when NVIDIA NVML / nvidia-smi is available.",
+            "Water values combine direct cooling (WUE, vendor-published) and indirect generation water "
+            "(NREL Macknick et al. 2012 + USGS 2020). Both are annual averages.",
+            "Watershed-stress weighting applies WRI Aqueduct baseline stress as a modest multiplier "
+            f"({WATER_STRESS_WEIGHTING_METHOD}); basin-level data may not match facility location.",
+            "PUE is treated as constant; real PUE varies with weather, load, and time of day.",
+            "Memory (DRAM) energy is NOT separately accounted for; it is captured only insofar as RAPL "
+            "package counters include the integrated memory controller.",
+        ]
+        if embodied["source"] == "modeled":
+            caveats.append(
+                f"Embodied carbon/water amortized over {embodied['useful_life_hours']} h useful life "
+                f"for SKU {embodied['sku']} ({embodied['label']}); source: {embodied['citation']}."
+            )
+        elif self.hardware_sku_requested:
+            caveats.append(
+                f"Embodied impact not computed: unknown or unsupported --hardware-sku "
+                f"'{self.hardware_sku_requested}' (tagged no_profile)."
+            )
+        else:
+            caveats.append(
+                "Embodied (manufacturing) carbon/water not computed — pass --hardware-sku or a "
+                "recognizable --hardware label (e.g. 'H100 SXM')."
+            )
+        if self.profile.get("carbon_source") == CARBON_SOURCE_EM:
+            ts = self.profile.get("timestamp") or "run start"
+            zone = self.profile.get("em_zone") or self.region
+            caveats.append(
+                f"Grid carbon intensity from ElectricityMaps at {ts} (zone/data-center: {zone}), "
+                f"tagged em_realtime."
+            )
+        else:
+            caveats.append(
+                "Grid carbon intensity is a regional annual average (static_avg). "
+                "For real-time attribution use --grid-source electricitymaps."
+            )
+            caveats.append(
+                "Grid carbon/water intensities are annual regional averages; short workloads may not align "
+                "with marginal dispatch at the time of execution."
+            )
+        if cpu_modeled > 0:
+            caveats.append(
+                f"CPU modeled with assumed TDP {self.cpu_tdp_fallback} W "
+                f"({cpu_modeled}/{len(self.samples)} samples); verify against instance SKU or SPECpower "
+                "for publishable results."
+            )
+
+        return {
+            "schema_version": "0.1",
+            "run_metadata": {
+                "started_at_utc": self.samples[0]["timestamp"],
+                "ended_at_utc": self.samples[-1]["timestamp"],
+                "duration_s": duration_s,
+                "samples": len(self.samples),
+                "host_os": platform.platform(),
+                "rapl_platform": self.rapl.platform,
+                "scope": self.scope,
+            },
+            "measured_sources": {
+                "cpu": cpu_sources,
+                "gpu": gpu_sources if gpu_sources else ["no_gpu"],
+                "cpu_rapl_samples": sum(1 for s in self.samples if s["cpu_source"] == "rapl_measured"),
+                "cpu_modeled_samples": cpu_modeled,
+                "gpu_missing_samples": sum(1 for s in self.samples if s["gpu_watts"] is None),
+            },
+            "energy": {
+                "it_cpu_wh": round(total_cpu_wh, 4),
+                "it_cpu_source": cpu_sources,
+                "it_gpu_wh": round(total_gpu_wh, 4),
+                "it_gpu_source": gpu_sources if gpu_sources else ["no_gpu"],
+                "it_total_kwh": round(it_kwh, 6),
+                "it_total_source": "sum_it_components",
+                "facility_total_kwh": round(facility_kwh, 6),
+                "facility_source": impacts["energy"]["facility_source"],
+            },
+            "carbon": {
+                "co2e_kg": round(impacts["carbon"]["co2e_kg"], 6),
+                "source": impacts["carbon"]["source"],
+                "energy_basis_kwh": round(impacts["carbon"]["energy_basis_kwh"], 6),
+            },
+            "water": {
+                "direct_cooling_l": round(impacts["water"]["direct_cooling_l"], 4),
+                "indirect_generation_l": round(impacts["water"]["indirect_generation_l"], 4),
+                "total_l": round(impacts["water"]["total_l"], 4),
+                "direct_source": impacts["water"]["direct_source"],
+                "indirect_source": impacts["water"]["indirect_source"],
+                "stress_score": impacts["water"]["stress_score"],
+                "stress_level": impacts["water"]["stress_level"],
+                "stress_basin": impacts["water"]["stress_basin"],
+                "stress_source": impacts["water"]["stress_source"],
+                "stress_weighted_total_l": round(impacts["water"]["stress_weighted_total_l"], 4),
+                "weighting_methodology": impacts["water"]["weighting_methodology"],
+            },
+            "embodied": {
+                "co2e_kg": embodied["co2e_kg"],
+                "water_l": embodied["water_l"],
+                "sku": embodied["sku"],
+                "useful_life_hours": embodied["useful_life_hours"],
+                "source": embodied["source"],
+                "citation": embodied["citation"],
+                "label": embodied["label"],
+            },
+            "lifecycle": {
+                "carbon": {
+                    "operational_kg": round(impacts["carbon"]["co2e_kg"], 6),
+                    "embodied_kg": embodied["co2e_kg"],
+                    "total_kg": round(impacts["carbon"]["co2e_kg"] + embodied["co2e_kg"], 6),
+                },
+                "water": {
+                    "operational_l": round(impacts["water"]["total_l"], 4),
+                    "embodied_l": embodied["water_l"],
+                    "total_l": round(impacts["water"]["total_l"] + embodied["water_l"], 4),
+                },
+            },
+            "assumptions": {
+                "region": self.region,
+                "region_label": self.profile["label"],
+                "grid_source": self.grid_source,
+                "grid_profile_source": self.profile.get("source", CARBON_SOURCE_STATIC),
+                "carbon_intensity_source": self.profile.get("carbon_source", CARBON_SOURCE_STATIC),
+                "carbon_intensity_timestamp": self.profile.get("timestamp"),
+                "em_zone": self.profile.get("em_zone"),
+                "pue": self.pue,
+                "pue_source": self.pue_source,
+                "wue_direct_l_per_kwh": self.wue_direct,
+                "wue_source": self.wue_source,
+                "grid_co2_kg_per_kwh": self.profile["co2_kg_per_kwh"],
+                "grid_water_l_per_kwh": self.profile["water_l_per_kwh"],
+                "carbon_energy_basis": "facility_kwh",
+                "carbon_rationale": "Scope 2: grid intensity applied to total facility electricity (IT × PUE).",
+                "cpu_tdp_fallback_w": self.cpu_tdp_fallback,
+                "hardware_sku": self.hardware_sku,
+                "hardware_sku_requested": self.hardware_sku_requested,
+            },
+            "caveats": caveats,
+        }
+
+    def write_outputs(self, summary, workload=None, write_dashboard=False,
+                      compare_summary=None, compare_samples=None, compare_workload=None):
+        csv_path = self.output_dir / "measurements.csv"
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(self.samples[0].keys()))
+            writer.writeheader()
+            for s in self.samples:
+                writer.writerow(s)
+
+        json_path = self.output_dir / "summary.json"
+        json_path.write_text(json.dumps(summary, indent=2))
+
+        md_path = self.output_dir / "report.md"
+        md_path.write_text(self._render_markdown(summary))
+
+        from dashboard import generate_dashboard, save_workload_metadata
+        workload_path = save_workload_metadata(self.output_dir, workload)
+
+        dashboard_path = None
+        if write_dashboard:
+            dashboard_path = generate_dashboard(
+                summary, self.samples, self.output_dir, workload=workload,
+                compare_summary=compare_summary,
+                compare_samples=compare_samples,
+                compare_workload=compare_workload,
+            )
+
+        return csv_path, json_path, md_path, workload_path, dashboard_path
+
+    @staticmethod
+    def _format_source_list(sources) -> str:
+        if isinstance(sources, str):
+            return sources
+        return ", ".join(sources)
+
+    @staticmethod
+    def _format_cpu_sources(meas: dict) -> str:
+        parts = []
+        if meas.get("cpu_rapl_samples"):
+            parts.append(f"rapl_measured: {meas['cpu_rapl_samples']} samples")
+        if meas.get("cpu_modeled_samples"):
+            parts.append(f"modeled_from_util: {meas['cpu_modeled_samples']} samples")
+        return ", ".join(parts) if parts else Meter._format_source_list(meas.get("cpu", ["unknown"]))
+
+    @staticmethod
+    def _render_markdown(s):
+        e, c, w, a = s["energy"], s["carbon"], s["water"], s["assumptions"]
+        emb = s.get("embodied", {})
+        lc = s.get("lifecycle", {})
+        meas = s["measured_sources"]
+        rm = s["run_metadata"]
+        cpu_tag = Meter._format_cpu_sources(meas)
+        gpu_tag = Meter._format_source_list(e.get("it_gpu_source", meas.get("gpu", ["no_gpu"])))
+        carbon_tag = c.get("source", a.get("carbon_intensity_source", CARBON_SOURCE_STATIC))
+        water_grid_tag = w.get("indirect_source", CARBON_SOURCE_STATIC)
+
+        lines = [
+            "# Workload Footprint Report",
+            "",
+            f"**Duration:** {rm['duration_s']} s ({rm['samples']} samples)  ",
+            f"**Region:** `{a['region']}` — {a['region_label']}  ",
+            f"**Host:** {rm['host_os']}",
+            "",
+            "## Energy",
+            "",
+            f"- CPU: **{e['it_cpu_wh']} Wh**  _({cpu_tag})_",
+            f"- GPU: **{e['it_gpu_wh']} Wh**  _({gpu_tag})_",
+            f"- IT total: **{e['it_total_kwh']} kWh**  _({e.get('it_total_source', 'sum_it_components')})_",
+            f"- Facility total (× PUE {a['pue']}): **{e['facility_total_kwh']} kWh**  "
+            f"_({e.get('facility_source', 'pue_multiplier')}, {a.get('pue_source', 'default_iea_2024')})_",
+            "",
+            "## Carbon",
+            "",
+            f"- Operational CO₂e: **{c['co2e_kg']} kg**  _({carbon_tag}, basis: {a.get('carbon_energy_basis', 'facility_kwh')})_",
+            f"- Grid intensity used: {a['grid_co2_kg_per_kwh']} kgCO₂e/kWh  _({carbon_tag})_",
+        ]
+        if emb.get("source") == "modeled":
+            lines.extend([
+                f"- Embodied CO₂e (amortized): **{emb['co2e_kg']} kg**  _(modeled, amortized; SKU {emb['sku']})_",
+                f"- Lifecycle CO₂e (operational + embodied): **{lc['carbon']['total_kg']} kg**",
+            ])
+        elif emb.get("source") == "no_profile":
+            lines.append(
+                f"- Embodied CO₂e: **not computed**  _(no_profile; requested SKU: {emb.get('sku') or 'none'})_"
+            )
+        lines.extend([
+            "",
+            "## Water",
+            "",
+            f"- Direct cooling (WUE {a['wue_direct_l_per_kwh']} L/kWh IT): **{w['direct_cooling_l']} L**  "
+            f"_({w.get('direct_source', 'modeled_wue')}, {a.get('wue_source', 'default_vendor_avg')})_",
+            f"- Indirect generation ({a['grid_water_l_per_kwh']} L/kWh facility): **{w['indirect_generation_l']} L**  "
+            f"_({water_grid_tag})_",
+            f"- Operational total: **{w['total_l']} L**  _(sum_water_components)_",
+        ])
+        if w.get("stress_weighted_total_l") is not None:
+            lines.append(
+                f"- Stress-weighted total: **{w['stress_weighted_total_l']} L**  "
+                f"_(WRI Aqueduct; basin {w.get('stress_basin', 'n/a')}; "
+                f"score {w.get('stress_score', 0)}; {w.get('weighting_methodology', '')})_"
+            )
+        if emb.get("source") == "modeled":
+            lines.extend([
+                f"- Embodied freshwater (amortized): **{emb['water_l']} L**  _(modeled, amortized; SKU {emb['sku']})_",
+                f"- Lifecycle water (operational + embodied): **{lc['water']['total_l']} L**",
+            ])
+        elif emb.get("source") == "no_profile":
+            lines.append(
+                f"- Embodied water: **not computed**  _(no_profile)_"
+            )
+        lines.extend([
+            "",
+            "## Caveats",
+            "",
+        ])
+        for cv in s["caveats"]:
+            lines.append(f"- {cv}")
+        lines.append("")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Workload-level energy, carbon, and water meter.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--region", default="global-avg", choices=sorted(REGION_PROFILES.keys()),
+                   help="Grid/cloud region for carbon and water intensity.")
+    p.add_argument("--pue", type=float, default=DEFAULT_PUE,
+                   help=f"Power Usage Effectiveness (default: {DEFAULT_PUE}).")
+    p.add_argument("--wue", type=float, default=None,
+                   help="Override direct WUE in L/kWh IT (default: region profile from vendor report).")
+    p.add_argument("--interval", type=float, default=1.0,
+                   help="Sampling interval in seconds (default: 1.0).")
+    p.add_argument("--cpu-tdp", type=float, default=65.0,
+                   help="CPU TDP in watts to use when RAPL is unavailable (default: 65).")
+    p.add_argument("--duration", type=float, default=None,
+                   help="Standalone measurement duration in seconds. Ignored if a command is given.")
+    p.add_argument("--output", default="./watermark_run",
+                   help="Output directory (default: ./watermark_run).")
+    p.add_argument("--scope", default="host", choices=["host"],
+                   help="Measurement scope (host only in v0.1; per-process is v0.3).")
+    p.add_argument("--grid-source", default="static", choices=["static", "electricitymaps"],
+                   dest="grid_source",
+                   help="Grid carbon intensity source: static regional table (default) or ElectricityMaps API.")
+    p.add_argument("--dashboard", action="store_true",
+                   help="Write dashboard.html (also auto-enabled with --run-id or --image-count).")
+    p.add_argument("--no-dashboard", action="store_true",
+                   help="Skip dashboard.html even when experiment metadata is set.")
+    p.add_argument("--run-id", default=None,
+                   help="Run identifier shown on the dashboard (default: derived from region + samples).")
+    p.add_argument("--workload-name", default=None,
+                   help="Workload label for the dashboard, e.g. 'SDXL · 100 imgs'.")
+    p.add_argument("--image-count", type=int, default=None,
+                   help="Number of images/units for per-item footprint on the dashboard.")
+    p.add_argument("--hardware", default=None,
+                   help="Hardware label for the dashboard sidebar, e.g. 'H100 SXM 80GB'.")
+    p.add_argument("--hardware-sku", default=None, dest="hardware_sku",
+                   help="Embodied-impact hardware profile: h100-sxm, a100, generic, default-gpu.")
+    p.add_argument("--steps", type=int, default=None,
+                   help="Inference/training steps per unit (dashboard metadata).")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Random seed (dashboard metadata).")
+    p.add_argument("--compute-rate", type=float, default=None, dest="compute_rate",
+                   help="USD per hour for compute cost KPI on the dashboard.")
+    p.add_argument("--model", default=None,
+                   help="Model ID or label for workload.json (e.g. meta-llama/Llama-3.2-3B-Instruct).")
+    p.add_argument("--facility-location", default=None, dest="facility_location",
+                   help="Physical site label for workload.json (e.g. 'Iceland (RunPod EUR-IS-3)').")
+    p.add_argument("--notes", default=None,
+                   help="Free-form run notes stored in workload.json and shown on the dashboard.")
+    p.add_argument("--cooling-system", default=None, dest="cooling_system",
+                   help="Facility cooling type for workload.json (e.g. evaporative, chilled-water).")
+    p.add_argument("--compare-run", default=None, dest="compare_run",
+                   help="Path to another run's summary.json (or run directory) for side-by-side dashboard comparison.")
+    p.add_argument("--portfolio-dir", type=Path, default=None, dest="portfolio_dir",
+                   help="Portfolio workspace to refresh: alone = generate only; with a run = auto-update after measurement.")
+    p.add_argument("--no-portfolio-update", action="store_true", dest="no_portfolio_update",
+                   help="Skip auto portfolio refresh after a measurement run.")
+    p.add_argument("--sort-by", default="timestamp",
+                   choices=["timestamp", "region", "workload", "carbon", "water", "cost", "energy"],
+                   dest="sort_by",
+                   help="Portfolio default sort order (with --portfolio-dir).")
+    p.add_argument("command", nargs=argparse.REMAINDER,
+                   help="Optional command to run while measuring. Prefix with --.")
+    args = p.parse_args()
+
+    if args.interval <= 0:
+        p.error("--interval must be > 0")
+    if args.pue < 1.0:
+        p.error("--pue must be >= 1.0 (ratio of facility to IT energy)")
+    if args.wue is not None and args.wue < 0:
+        p.error("--wue must be >= 0")
+    if args.cpu_tdp <= 0:
+        p.error("--cpu-tdp must be > 0")
+    if args.duration is not None and args.duration <= 0:
+        p.error("--duration must be > 0")
+    if args.image_count is not None and args.image_count <= 0:
+        p.error("--image-count must be > 0")
+    if args.compute_rate is not None and args.compute_rate < 0:
+        p.error("--compute-rate must be >= 0")
+
+    args.pue_source = "user_override" if "--pue" in sys.argv else "default_iea_2024"
+    args.wue_source = "user_override" if "--wue" in sys.argv else None
+    return args
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "portfolio":
+        from dashboard.portfolio import portfolio_cli_main
+        raise SystemExit(portfolio_cli_main(sys.argv[2:]))
+
+    args = parse_args()
+
+    cmd = list(args.command)
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+
+    if args.portfolio_dir and not cmd and args.duration is None:
+        from dashboard.portfolio import discover_run_dirs, generate_portfolio, resolve_portfolio_output
+        scan_dir = Path(args.portfolio_dir).resolve()
+        out = resolve_portfolio_output(args.output)
+        path = generate_portfolio(scan_dir, out, sort_by=args.sort_by)
+        print(f"[watermark] portfolio: found {len(discover_run_dirs(scan_dir))} run(s)")
+        print(f"[watermark] wrote {path}")
+        return 0
+
+    sku_requested = _normalize_hardware_sku(args.hardware_sku) if args.hardware_sku else None
+    sku_resolved = resolve_hardware_sku(
+        sku_requested,
+        args.hardware or args.workload_name,
+    )
+    meter = Meter(
+        region=args.region,
+        pue=args.pue,
+        wue_direct=args.wue,
+        interval_s=args.interval,
+        cpu_tdp_fallback=args.cpu_tdp,
+        output_dir=args.output,
+        scope=args.scope,
+        pue_source=args.pue_source,
+        wue_source=args.wue_source,
+        grid_source=args.grid_source,
+        hardware_sku=sku_resolved,
+        hardware_sku_requested=sku_requested,
+    )
+
+    cpu_hint = "rapl_measured" if meter.rapl.available else "modeled_from_util"
+    gpu_hint = meter.nvml.mode if meter.nvml.available else "no_gpu"
+    carbon_hint = meter.profile.get("carbon_source", CARBON_SOURCE_STATIC)
+    print(f"[watermark] region:       {args.region} ({REGION_PROFILES[args.region]['label']})")
+    print(f"[watermark] grid source:  {args.grid_source} (carbon: {carbon_hint})")
+    print(f"[watermark] cpu source:   {cpu_hint}" +
+          (f" ({meter.rapl.platform})" if meter.rapl.platform else ""))
+    print(f"[watermark] gpu source:   {gpu_hint}")
+    print(f"[watermark] PUE={args.pue} ({args.pue_source})  "
+          f"WUE_direct={meter.wue_direct} ({meter.wue_source})  interval={args.interval}s")
+    print(f"[watermark] output:       {args.output}")
+    if args.portfolio_dir:
+        print(f"[watermark] portfolio:    auto-update {args.portfolio_dir.resolve()}")
+    elif os.environ.get("WATERMARK_PORTFOLIO_DIR"):
+        print(f"[watermark] portfolio:    auto-update {os.environ['WATERMARK_PORTFOLIO_DIR']}")
+    if sku_resolved:
+        print(f"[watermark] hardware SKU: {sku_resolved} (embodied amortized)")
+    elif sku_requested:
+        print(f"[watermark] hardware SKU: {sku_requested} (unknown — embodied=no_profile)")
+    elif args.hardware:
+        print(f"[watermark] hardware SKU: not recognized from --hardware (embodied skipped)")
+    print()
+
+    try:
+        if cmd:
+            print(f"[watermark] running: {' '.join(cmd)}")
+            rc = meter.run_command(cmd)
+            print(f"[watermark] command exited with code {rc}")
+        elif args.duration is not None:
+            print(f"[watermark] measuring for {args.duration}s ...")
+            meter.run_for(args.duration)
+        else:
+            print("error: provide either --duration N or a command after --", file=sys.stderr)
+            sys.exit(2)
+
+        summary = meter.aggregate()
+        workload = {
+            "run_id": args.run_id,
+            "name": args.workload_name,
+            "image_count": args.image_count,
+            "hardware": args.hardware,
+            "steps": args.steps,
+            "seed": args.seed,
+            "compute_rate_usd_hr": args.compute_rate,
+            "model": args.model,
+            "facility_location": args.facility_location,
+            "notes": args.notes,
+            "cooling_system": args.cooling_system,
+        }
+        from dashboard import load_compare_run, should_write_dashboard
+        compare_summary = compare_samples = compare_workload = None
+        if args.compare_run:
+            try:
+                compare_summary, compare_samples, compare_workload = load_compare_run(
+                    Path(args.compare_run),
+                )
+            except (FileNotFoundError, ValueError, json.JSONDecodeError, KeyError) as exc:
+                print(f"error: --compare-run: {exc}", file=sys.stderr)
+                sys.exit(2)
+        write_dashboard = should_write_dashboard(
+            run_id=args.run_id,
+            image_count=args.image_count,
+            dashboard=args.dashboard,
+            no_dashboard=args.no_dashboard,
+            compare_run=args.compare_run,
+        )
+        csv_path, json_path, md_path, workload_path, dashboard_path = meter.write_outputs(
+            summary,
+            workload=workload,
+            write_dashboard=write_dashboard,
+            compare_summary=compare_summary,
+            compare_samples=compare_samples,
+            compare_workload=compare_workload,
+        )
+
+        print()
+        print(f"[watermark] wrote {csv_path}")
+        print(f"[watermark] wrote {json_path}")
+        print(f"[watermark] wrote {md_path}")
+        if workload_path:
+            print(f"[watermark] wrote {workload_path}")
+        if dashboard_path:
+            print(f"[watermark] wrote {dashboard_path}")
+        elif not write_dashboard:
+            print("[watermark] dashboard skipped (use --dashboard or pass --run-id / --image-count)")
+
+        if not args.no_portfolio_update:
+            from dashboard.portfolio import discover_run_dirs, regenerate_portfolio_after_run
+            portfolio_path = regenerate_portfolio_after_run(
+                Path(args.output),
+                portfolio_dir=args.portfolio_dir,
+                sort_by=args.sort_by,
+            )
+            if portfolio_path is not None:
+                count = len(discover_run_dirs(portfolio_path.parent))
+                print(f"[watermark] portfolio: refreshed ({count} run(s) scanned)")
+                print(f"[watermark] wrote {portfolio_path}")
+
+        print()
+        print(md_path.read_text())
+    finally:
+        meter.nvml.shutdown()
+
+
+if __name__ == "__main__":
+    main()

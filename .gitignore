@@ -1,0 +1,60 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Environment / secrets
+.env
+.env.local
+*.key
+secrets/
+
+# Output artifacts (regeneratable, not source of truth)
+**/images/
+**/test_images/
+**/sample_*/
+*_test/
+*_check/
+quick_test/
+watermark_run/
+watermark_run_dev/
+watermark_run_exp/
+verify_test/
+
+# Per-run portable doc copies (repo-root METHODOLOGY.md and README.md are kept)
+/*/METHODOLOGY.md
+/*/README.md
+/portfolio_compare/*/METHODOLOGY.md
+/portfolio_compare/*/README.md
+
+# Measurement runs — excluded from initial public release (un-ignore when ready)
+va_run/
+va_run_v01/
+se_run_v01/
+jp_run_v01/
+no_run_v01/
+jp_image_v01/
+jp_text_v01/
+or_run_v01/
+compare_va_no/
+portfolio.html
+portfolio.snapshot.json
+portfolio_compare/
+
+# Internal / personal context (not for public repo)
+PROJECT_MEMORY.md
+
+# Mac
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.cursor/
