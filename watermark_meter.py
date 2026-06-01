@@ -76,6 +76,10 @@ WATER_STRESS_WEIGHTING_METHOD = "multiplier_1_plus_score, see methodology"
 #   wue_direct_l_per_kwh : direct cooling water per kWh IT (vendor-published where available)
 #       sources: AWS 2024 Sustainability Report regional WUE table (primary);
 #       climate_estimate where AWS reports N/A for that region.
+#
+# Values for sa-east-1, ca-central-1, ap-southeast-2, ap-east-1, and ap-northeast-2
+# are based on national/regional averages. Facility-specific values may vary. v0.2 will
+# refine with operator-published data where available.
 REGION_PROFILES = {
     # WRI Aqueduct 2023 BWS: low–medium; basin ~Northern Virginia / Lower Chesapeake.
     "us-east-1": {
@@ -211,6 +215,81 @@ REGION_PROFILES = {
         "water_stress_basin": "Singapore-Johor",
         "stress_source": STRESS_SOURCE_DEFAULT,
     },
+    # CO₂ 0.07 kg/kWh (IEA 2024, hydro-dominated Brazil grid).
+    # Indirect water 9.0 L/kWh (high hydro share, NREL Macknick et al. 2012).
+    # WUE 0.6 L/kWh IT (warm/humid climate estimate; AWS 2024 N/A for São Paulo).
+    # WRI Aqueduct 2023 BWS: medium; Paraíba do Sul basin.
+    "sa-east-1": {
+        "label": "Brazil (São Paulo)",
+        "co2_kg_per_kwh": 0.07,
+        "water_l_per_kwh": 9.00,
+        "wue_direct_l_per_kwh": 0.60,
+        "wue_source": "climate_estimate",
+        "water_stress_score": 0.30,
+        "water_stress_level": "medium",
+        "water_stress_basin": "Paraíba do Sul",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # CO₂ 0.03 kg/kWh (IEA 2024, mostly hydro Quebec grid).
+    # Indirect water 7.5 L/kWh (hydro reservoir evaporation, NREL Macknick et al. 2012).
+    # WUE 0.15 L/kWh IT (cool climate estimate; AWS 2024 N/A for Montreal).
+    # WRI Aqueduct 2023 BWS: low; St. Lawrence basin.
+    "ca-central-1": {
+        "label": "Canada (Montreal)",
+        "co2_kg_per_kwh": 0.03,
+        "water_l_per_kwh": 7.50,
+        "wue_direct_l_per_kwh": 0.15,
+        "wue_source": "climate_estimate",
+        "water_stress_score": 0.10,
+        "water_stress_level": "low",
+        "water_stress_basin": "St. Lawrence",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # CO₂ 0.65 kg/kWh (AEMO NEM 2023, coal-heavy NSW grid).
+    # Indirect water 1.3 L/kWh (coal + gas thermoelectric, NREL Macknick et al. 2012).
+    # WUE 0.45 L/kWh IT (warm/dry climate estimate; AWS 2024 N/A for Sydney).
+    # WRI Aqueduct 2023 BWS: medium-high; Hawkesbury-Nepean basin.
+    "ap-southeast-2": {
+        "label": "Australia (Sydney)",
+        "co2_kg_per_kwh": 0.65,
+        "water_l_per_kwh": 1.30,
+        "wue_direct_l_per_kwh": 0.45,
+        "wue_source": "climate_estimate",
+        "water_stress_score": 0.40,
+        "water_stress_level": "medium-high",
+        "water_stress_basin": "Hawkesbury-Nepean",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # CO₂ 0.71 kg/kWh (IEA 2024, gas + coal Hong Kong grid).
+    # Indirect water 1.2 L/kWh (thermoelectric mix, NREL Macknick et al. 2012).
+    # WUE 0.7 L/kWh IT (tropical high-evaporative climate estimate; AWS 2024 N/A).
+    # WRI Aqueduct 2023 BWS: high; Pearl River basin.
+    "ap-east-1": {
+        "label": "Hong Kong",
+        "co2_kg_per_kwh": 0.71,
+        "water_l_per_kwh": 1.20,
+        "wue_direct_l_per_kwh": 0.70,
+        "wue_source": "climate_estimate",
+        "water_stress_score": 0.55,
+        "water_stress_level": "high",
+        "water_stress_basin": "Pearl River",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
+    # CO₂ 0.42 kg/kWh (IEA 2024, nuclear + coal Korea grid).
+    # Indirect water 1.8 L/kWh (nuclear + coal cooling water, NREL Macknick et al. 2012).
+    # WUE 0.4 L/kWh IT (temperate climate estimate; AWS 2024 N/A for Seoul).
+    # WRI Aqueduct 2023 BWS: medium-high; Han River basin.
+    "ap-northeast-2": {
+        "label": "Korea (Seoul)",
+        "co2_kg_per_kwh": 0.42,
+        "water_l_per_kwh": 1.80,
+        "wue_direct_l_per_kwh": 0.40,
+        "wue_source": "climate_estimate",
+        "water_stress_score": 0.45,
+        "water_stress_level": "medium-high",
+        "water_stress_basin": "Han River",
+        "stress_source": STRESS_SOURCE_DEFAULT,
+    },
     # Multi-basin global average; medium stress as conservative default.
     "global-avg": {
         "label": "Global average (IEA 2024)",
@@ -245,6 +324,11 @@ EM_ZONE_MAP = {
     "ap-northeast-1": "JP-TK",         # Japan — Tōkyō
     "ap-south-1":     "IN-WE",         # India — Western (Mumbai)
     "ap-southeast-1": "SG",            # Singapore
+    "sa-east-1":      "BR-CS",         # Brazil — Central (São Paulo; EM has no BR-SP)
+    "ca-central-1":   "CA-QC",         # Canada — Québec (Montreal)
+    "ap-southeast-2": "AU-NSW",        # Australia — New South Wales (Sydney)
+    "ap-east-1":      "HK",            # Hong Kong
+    "ap-northeast-2": "KR",            # South Korea (Seoul)
 }
 
 _GRID_PROFILE_CACHE: dict[tuple, dict] = {}
