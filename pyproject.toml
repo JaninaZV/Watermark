@@ -15,6 +15,21 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = ["pynvml"]
+workloads = [
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "safetensors",
+    "sentence-transformers",
+]
+all = [
+    "pynvml",
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "safetensors",
+    "sentence-transformers",
+]
 dev = ["pytest"]
 
 [project.scripts]

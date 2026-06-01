@@ -74,6 +74,29 @@ If `pynvml` isn't installed, the tool falls back to shelling out to `nvidia-smi`
 
 You can also run without installing: `python3 watermark_meter.py --help`
 
+## Pod quickstart
+
+On [RunPod](https://www.runpod.io/), use a **PyTorch / Hugging Face** template pod, then:
+
+```bash
+git clone https://github.com/JaninaZV/Watermark.git
+cd watermark && bash pod_setup.sh
+```
+
+Optionally set live grid carbon (static regional profiles work without this):
+
+```bash
+export ELECTRICITYMAPS_API_KEY="your-key"
+```
+
+Example measurement:
+
+```bash
+watermark --duration 60 --region us-east-1 --output ./run1
+```
+
+**Tip:** Mount a network volume at `~/.cache/huggingface/` so large models (14GB+) are not re-downloaded on every pod restart.
+
 ## Quickstart
 
 Measure for 60 seconds in US-East (Virginia):
