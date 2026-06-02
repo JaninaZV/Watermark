@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 WORKLOAD_METRICS_FILENAME = "workload_metrics.json"
+PRE_ANNOTATION_SUMMARY_FILENAME = "summary.pre_annotation.json"
 
 # Priority when multiple counts are present (training vs inference semantics differ).
 _UNIT_PRIORITY: tuple[tuple[str, str], ...] = (
@@ -122,6 +123,32 @@ def build_per_unit_from_summary(
     }
 
 
+def preserve_pre_annotation_summary(run_dir: Path, summary: dict[str, Any]) -> Path | None:
+    """
+    Snapshot summary.json before post-hoc annotation (written once, never overwritten).
+
+    The pre-annotation file is the measurement-time artifact for audit totals;
+    summary.json after annotate is a derived artifact with per_unit normalization.
+    """
+    path = Path(run_dir) / PRE_ANNOTATION_SUMMARY_FILENAME
+    if path.is_file():
+        return None
+    path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def is_post_measurement_normalization(summary: dict[str, Any]) -> bool:
+    """True when per_unit was applied after the original measurement artifact."""
+    if summary.get("normalization_applied_post_measurement") is True:
+        return True
+    per_unit = summary.get("per_unit") or {}
+    source = str(per_unit.get("normalization_source", ""))
+    if source == "watermark annotate":
+        return True
+    caveats = summary.get("caveats") or []
+    return any(c.get("code") == "per_unit_post_hoc" for c in caveats if isinstance(c, dict))
+
+
 def apply_per_unit_to_summary(
     summary: dict[str, Any],
     unit_type: str,
@@ -139,8 +166,10 @@ def apply_per_unit_to_summary(
         unit_count,
         normalization_source=normalization_source,
     )
+    per_unit["applied_post_measurement"] = post_hoc
     summary = dict(summary)
     summary["per_unit"] = per_unit
+    summary["normalization_applied_post_measurement"] = post_hoc
     summary["water"] = dict(summary["water"])
     summary["water"]["wwl_per_unit_ml"] = per_unit["wwl_ml_per_unit"]
 

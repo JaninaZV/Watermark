@@ -69,6 +69,7 @@ Existing parsers built for `0.1` must continue to work across minor bumps.
 | `caveats` | array | Structured methodology limitations (see below) |
 | `measurement_grade` | `"A"` \| `"B"` \| `"C"` | v0.3 — worst-condition confidence rollup |
 | `grade_limiting_factor` | string \| null | v0.3 — required when grade is B or C |
+| `normalization_applied_post_measurement` | boolean | v0.3 — `true` when `per_unit` was applied via `watermark annotate` after the run ended |
 | `per_unit` | object \| null | v0.3 — normalized WWL/energy/carbon (see below) |
 
 ### `run_metadata`
@@ -102,7 +103,8 @@ at start but interrupted mid-run → `rapl_interrupted` → grade C.
 
 ### `per_unit` (v0.3)
 
-Present when `--token-count`, `--request-count`, `--training-steps`, or `--image-count` is set.
+Present when `--token-count`, `--request-count`, `--training-steps`, or `--image-count` is set
+at measurement time, or when `watermark annotate` adds normalization afterward.
 
 | Field | Type |
 |-------|------|
@@ -112,6 +114,13 @@ Present when `--token-count`, `--request-count`, `--training-steps`, or `--image
 | `energy_wh_per_unit` | number |
 | `carbon_g_per_unit` | number |
 | `normalization_source` | string \| null | v0.3 — `cli`, `workload_metrics.json`, `generate_text.py`, `watermark annotate`, etc. |
+| `applied_post_measurement` | boolean | v0.3 — mirrors top-level `normalization_applied_post_measurement` |
+
+**Audit semantics:** An annotated `summary.json` is a **derived artifact**, not interchangeable
+with the measurement-time summary for attestation of totals. When `watermark annotate` runs,
+the CLI writes `summary.pre_annotation.json` once (snapshot before annotation). `watermark
+audit-pack` sets `normalization_applied_post_measurement: true` in `audit_manifest.json` and
+includes both files when post-hoc normalization applies.
 
 ### `measured_sources`
 
@@ -437,6 +446,32 @@ When added, this block will be **optional** (minor version bump). Existing
   ]
 }
 ```
+
+---
+
+## Audit pack (`audit.zip`)
+
+Exported by `watermark audit-pack ./run_dir --output audit.zip`. Self-contained bundle
+for compliance review (CSRD-style attestation, third-party audit).
+
+### `audit_manifest.json`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `audit_pack_schema_version` | string | Manifest contract version (currently `"1.0"`) |
+| `normalization_applied_post_measurement` | boolean | **`true`** when `summary.json` includes post-hoc `per_unit` from `watermark annotate` |
+| `artifacts` | object | Map of included files to human-readable role descriptions |
+| `pre_annotation_summary_missing` | string | Present only when post-hoc flag is set but `summary.pre_annotation.json` was not found |
+
+When `normalization_applied_post_measurement` is **true**, the zip includes:
+
+| File | Role |
+|------|------|
+| `summary.pre_annotation.json` | Measurement-time totals and grades **before** annotate |
+| `summary.json` | Current summary including derived per-unit intensities |
+
+Auditors must not treat these as the same artifact: pre-annotation attests to what was
+known at measurement time; annotated summary adds unit counts supplied afterward.
 
 ---
 

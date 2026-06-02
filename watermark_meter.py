@@ -1231,6 +1231,7 @@ def build_per_unit_block(
     }
     if normalization_source:
         block["normalization_source"] = normalization_source
+    block["applied_post_measurement"] = False
     return block
 
 
@@ -1623,6 +1624,7 @@ class Meter:
             "schema_version": "0.3",
             "measurement_grade": measurement_grade,
             "grade_limiting_factor": grade_limiting_factor,
+            "normalization_applied_post_measurement": False,
             "per_unit": per_unit,
             "run_metadata": {
                 "started_at_utc": self.samples[0]["timestamp"],

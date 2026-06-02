@@ -8,7 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from audit_pack import build_assumption_lineage, create_audit_pack, methodology_hash
+from audit_pack import (
+    AUDIT_PACK_SCHEMA_VERSION,
+    build_assumption_lineage,
+    create_audit_pack,
+    methodology_hash,
+)
+from workload_metrics import PRE_ANNOTATION_SUMMARY_FILENAME
 from compare_regions import COMPARISON_SCHEMA_VERSION, build_comparison
 from gate import evaluate_gate
 from measurement_grade import compute_measurement_grade
@@ -194,7 +200,35 @@ class TestAuditPack:
         assert out1.read_bytes() == out2.read_bytes()
         with zipfile.ZipFile(out1) as zf:
             names = set(zf.namelist())
-        assert {"summary.json", "measurements.csv", "METHODOLOGY.md", "caveats.json", "README.md"} <= names
+            assert {"summary.json", "measurements.csv", "METHODOLOGY.md", "caveats.json", "README.md", "audit_manifest.json"} <= names
+            manifest = json.loads(zf.read("audit_manifest.json"))
+        assert manifest["normalization_applied_post_measurement"] is False
+
+    def test_audit_pack_post_hoc_includes_pre_annotation(self, tmp_path):
+        from annotate import annotate_run_dir
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        summary = _base_summary()
+        (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        (run_dir / "measurements.csv").write_text("timestamp,cpu_watts\n2026-01-01T00:00:00,10\n")
+        annotate_run_dir(run_dir, token_count=1000, regenerate_report=False)
+
+        out = tmp_path / "audit.zip"
+        create_audit_pack(run_dir, out)
+        with zipfile.ZipFile(out) as zf:
+            names = set(zf.namelist())
+            manifest = json.loads(zf.read("audit_manifest.json"))
+            pre = json.loads(zf.read(PRE_ANNOTATION_SUMMARY_FILENAME))
+            current = json.loads(zf.read("summary.json"))
+
+        assert manifest["audit_pack_schema_version"] == AUDIT_PACK_SCHEMA_VERSION
+        assert manifest["normalization_applied_post_measurement"] is True
+        assert PRE_ANNOTATION_SUMMARY_FILENAME in names
+        assert pre.get("per_unit") is None
+        assert current["per_unit"]["unit_count"] == 1000
+        assert current["normalization_applied_post_measurement"] is True
+        assert "summary.pre_annotation.json" in manifest["artifacts"]
 
     def test_assumption_lineage_includes_grade(self):
         lineage = build_assumption_lineage(_base_summary())
@@ -245,6 +279,24 @@ class TestAnnotateAndWorkloadMetrics:
         assert updated["per_unit"]["unit_count"] == 1000
         assert updated["per_unit"]["normalization_source"] == "watermark annotate"
         assert any(c["code"] == "per_unit_post_hoc" for c in updated["caveats"])
+        assert updated["normalization_applied_post_measurement"] is True
+        pre_path = run_dir / PRE_ANNOTATION_SUMMARY_FILENAME
+        assert pre_path.is_file()
+        pre = json.loads(pre_path.read_text(encoding="utf-8"))
+        assert pre.get("per_unit") is None
+        assert pre.get("normalization_applied_post_measurement") is not True
+
+    def test_preserve_pre_annotation_not_overwritten(self, tmp_path):
+        from annotate import annotate_run_dir
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        summary = _base_summary()
+        (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        annotate_run_dir(run_dir, token_count=1000, regenerate_report=False)
+        first_pre = (run_dir / PRE_ANNOTATION_SUMMARY_FILENAME).read_text(encoding="utf-8")
+        annotate_run_dir(run_dir, token_count=2000, regenerate_report=False)
+        assert (run_dir / PRE_ANNOTATION_SUMMARY_FILENAME).read_text(encoding="utf-8") == first_pre
 
     def test_auto_metrics_from_file(self, tmp_path):
         from workload_metrics import load_workload_metrics, resolve_unit_normalization, write_workload_metrics

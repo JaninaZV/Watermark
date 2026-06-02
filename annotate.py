@@ -8,9 +8,11 @@ import sys
 from pathlib import Path
 
 from workload_metrics import (
+    PRE_ANNOTATION_SUMMARY_FILENAME,
     apply_per_unit_to_summary,
     load_counts_from_workload_json,
     load_workload_metrics,
+    preserve_pre_annotation_summary,
     resolve_unit_normalization,
     write_workload_metrics,
 )
@@ -44,7 +46,6 @@ def annotate_run_dir(
         metrics = load_counts_from_workload_json(run_dir)
         if metrics is None:
             raise FileNotFoundError(f"no normalization counts in {run_dir}/workload.json")
-        source_hint = "workload.json"
 
     unit_type, unit_count, resolved_source = resolve_unit_normalization(
         metrics,
@@ -62,6 +63,8 @@ def annotate_run_dir(
     norm_source = "watermark annotate"
     if from_metrics or from_workload:
         norm_source = resolved_source or "workload_metrics.json"
+
+    preserve_pre_annotation_summary(run_dir, summary)
     summary = apply_per_unit_to_summary(
         summary,
         unit_type,
@@ -158,6 +161,11 @@ def annotate_cli_main(argv: list[str] | None = None) -> int:
         f"({pu['unit_count']} {pu['unit_type']}s, source: {pu['normalization_source']})"
     )
     print(f"[watermark] wrote {args.run_dir / 'summary.json'}")
+    pre = args.run_dir / PRE_ANNOTATION_SUMMARY_FILENAME
+    if pre.is_file():
+        print(f"[watermark] preserved measurement-time artifact: {pre}")
+        print("[watermark] note: summary.json is a derived artifact after annotate; "
+              "audit-pack includes both for compliance review.")
 
     if args.dashboard:
         from dashboard import generate_dashboard, load_run_dir
