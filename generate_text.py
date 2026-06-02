@@ -97,6 +97,8 @@ def main():
     print(f"[generate_text] Generating {args.count} completions "
           f"(max {args.max_tokens} new tokens each)...")
     started = time.time()
+    completion_tokens = 0
+    prompt_tokens = 0
 
     for i in range(args.count):
         prompt = PROMPTS[i % len(PROMPTS)]
@@ -109,6 +111,7 @@ def main():
             text = prompt
 
         inputs = tokenizer(text, return_tensors="pt").to(model.device)
+        prompt_len = int(inputs["input_ids"].shape[-1])
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -116,6 +119,10 @@ def main():
                 do_sample=False,
                 pad_token_id=tokenizer.pad_token_id,
             )
+
+        new_tokens = int(outputs.shape[-1]) - prompt_len
+        completion_tokens += max(new_tokens, 0)
+        prompt_tokens += prompt_len
 
         completion = tokenizer.decode(outputs[0], skip_special_tokens=True)
         (output_dir / f"completion_{i:04d}.txt").write_text(completion, encoding="utf-8")
@@ -128,6 +135,23 @@ def main():
     per_item = total / args.count
     print(f"[generate_text] Done. {args.count} completions in {total:.1f}s "
           f"({per_item:.2f}s each).")
+    print(f"[generate_text] Tokens: {completion_tokens} completion "
+          f"({prompt_tokens} prompt, {completion_tokens + prompt_tokens} total)")
+
+    try:
+        from workload_metrics import write_workload_metrics
+        write_workload_metrics(output_dir, {
+            "token_count": completion_tokens,
+            "completion_tokens": completion_tokens,
+            "prompt_tokens": prompt_tokens,
+            "total_tokens": completion_tokens + prompt_tokens,
+            "request_count": args.count,
+            "completion_count": args.count,
+            "source": "generate_text.py",
+        })
+        print(f"[generate_text] Wrote {output_dir / 'workload_metrics.json'} for Watermark per-unit normalization")
+    except ImportError:
+        pass
 
 
 if __name__ == "__main__":

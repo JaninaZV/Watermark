@@ -1216,18 +1216,22 @@ def build_per_unit_block(
     unit_type: str | None,
     unit_count: int | None,
     facility_wh: float,
+    normalization_source: str | None = None,
 ) -> dict | None:
     if not unit_type or not unit_count or unit_count <= 0:
         return None
     wwl_ml = impacts["water"]["wwl_ml"]
     carbon_g = impacts["carbon"]["co2e_kg"] * 1000
-    return {
+    block = {
         "unit_type": unit_type,
         "unit_count": unit_count,
         "wwl_ml_per_unit": round(wwl_ml / unit_count, 6),
         "energy_wh_per_unit": round(facility_wh / unit_count, 6),
         "carbon_g_per_unit": round(carbon_g / unit_count, 6),
     }
+    if normalization_source:
+        block["normalization_source"] = normalization_source
+    return block
 
 
 # ---------------------------------------------------------------------------
@@ -1261,6 +1265,7 @@ class Meter:
         self.training_steps = training_steps
         self.workload_type = workload_type
         self.water_stress_season = water_stress_season
+        self.normalization_source: str | None = None
         self.run_at = dt.datetime.now(dt.timezone.utc)
         self.profile = fetch_grid_profile(
             region,
@@ -1407,6 +1412,7 @@ class Meter:
             unit_type=unit_type,
             unit_count=unit_count,
             facility_wh=facility_wh,
+            normalization_source=self.normalization_source,
         )
         if per_unit:
             impacts["water"]["wwl_per_unit_ml"] = per_unit["wwl_ml_per_unit"]
@@ -1579,6 +1585,13 @@ class Meter:
                 f"CPU modeled with assumed TDP {self.cpu_tdp_fallback} W "
                 f"({cpu_modeled}/{len(self.samples)} samples); verify against instance SKU or SPECpower "
                 "for publishable results.",
+            ))
+        if per_unit and self.normalization_source and self.normalization_source != "cli":
+            caveats.append(make_caveat(
+                "per_unit_from_workload_metrics",
+                "info",
+                f"per_unit normalized using {per_unit['unit_count']} {per_unit['unit_type']}(s) "
+                f"reported by workload ({self.normalization_source}).",
             ))
 
         draft_summary = {
@@ -1979,6 +1992,9 @@ def main():
         if sub == "gate":
             from gate import gate_cli_main
             raise SystemExit(gate_cli_main(sys.argv[2:]))
+        if sub == "annotate":
+            from annotate import annotate_cli_main
+            raise SystemExit(annotate_cli_main(sys.argv[2:]))
 
     args = parse_args()
     _warn_em_key_if_static(args.grid_source)
@@ -2060,6 +2076,27 @@ def main():
         else:
             print("error: provide either --duration N or a command after --", file=sys.stderr)
             sys.exit(2)
+
+        from workload_metrics import load_workload_metrics, resolve_unit_normalization
+
+        auto_metrics = load_workload_metrics(meter.output_dir)
+        _ut, _uc, norm_src = resolve_unit_normalization(
+            auto_metrics,
+            token_count=meter.token_count,
+            request_count=meter.request_count,
+            training_steps=meter.training_steps,
+            image_count=meter.image_count,
+        )
+        if norm_src:
+            meter.normalization_source = norm_src
+        if _ut == "training_step" and _uc and not meter.training_steps:
+            meter.training_steps = _uc
+        elif _ut == "token" and _uc and not meter.token_count:
+            meter.token_count = _uc
+        elif _ut == "request" and _uc and not meter.request_count:
+            meter.request_count = _uc
+        elif _ut == "image" and _uc and not meter.image_count:
+            meter.image_count = _uc
 
         summary = meter.aggregate()
         workload = {

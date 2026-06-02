@@ -111,6 +111,7 @@ Present when `--token-count`, `--request-count`, `--training-steps`, or `--image
 | `wwl_ml_per_unit` | number |
 | `energy_wh_per_unit` | number |
 | `carbon_g_per_unit` | number |
+| `normalization_source` | string \| null | v0.3 — `cli`, `workload_metrics.json`, `generate_text.py`, `watermark annotate`, etc. |
 
 ### `measured_sources`
 

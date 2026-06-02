@@ -50,7 +50,7 @@ You optimized for carbon. **Did you check water?**
 - **Operator disclosures** — `--water-source operator` from static hyperscaler registry
 - **Audit pack** — `watermark audit-pack ./run_dir --output audit.zip`
 - **CI gate** — `watermark gate --max-wwl-ml-per-unit 500` (see `.watermark-gate.json`)
-- **Per-unit normalization** — `--token-count`, `--request-count`, `--training-steps`
+- **Per-unit normalization** — `--token-count`, `--request-count`, `--training-steps`; auto from `workload_metrics.json`; post-hoc via `watermark annotate`
 - **Watershed stress** — WRI Aqueduct + seasonal multipliers (`--water-stress-season`)
 - **Cooling type** — `--cooling-system` adjusts direct WUE (evaporative, air, liquid, immersion)
 - **Carbon (context)** — operational CO₂e; optional ElectricityMaps realtime
@@ -283,6 +283,11 @@ EOF
 watermark --region us-east-1 --duration 60 --token-count 1000 --output ./run
 watermark gate ./run --max-wwl-ml-per-unit 500
 watermark audit-pack ./run --output audit.zip
+
+# Production: meter first, add token count later from your inference logs
+watermark annotate ./run --token-count 847231
+
+# Or if generate_text.py / generate_code.py ran inside watermark, counts are picked up automatically
 ```
 
 GitHub Actions example: see [`.github/workflows/test.yml`](./.github/workflows/test.yml).

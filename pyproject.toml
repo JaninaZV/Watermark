@@ -44,6 +44,8 @@ py-modules = [
     "audit_pack",
     "compare_regions",
     "gate",
+    "workload_metrics",
+    "annotate",
 ]
 packages = ["dashboard"]
 

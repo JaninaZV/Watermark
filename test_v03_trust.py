@@ -230,3 +230,31 @@ class TestPerUnitAndWorkload:
     def test_infer_training(self):
         assert wm.infer_workload_type(training_steps=1000) == "training"
         assert wm.infer_workload_type(token_count=500) == "inference"
+
+
+class TestAnnotateAndWorkloadMetrics:
+    def test_annotate_adds_per_unit_post_hoc(self, tmp_path):
+        from annotate import annotate_run_dir
+        from test_v03_trust import _base_summary
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        summary = _base_summary()
+        (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        updated = annotate_run_dir(run_dir, token_count=1000, regenerate_report=False)
+        assert updated["per_unit"]["unit_count"] == 1000
+        assert updated["per_unit"]["normalization_source"] == "watermark annotate"
+        assert any(c["code"] == "per_unit_post_hoc" for c in updated["caveats"])
+
+    def test_auto_metrics_from_file(self, tmp_path):
+        from workload_metrics import load_workload_metrics, resolve_unit_normalization, write_workload_metrics
+
+        write_workload_metrics(tmp_path, {
+            "completion_tokens": 42000,
+            "source": "generate_text.py",
+        })
+        metrics = load_workload_metrics(tmp_path)
+        unit_type, count, source = resolve_unit_normalization(metrics)
+        assert unit_type == "token"
+        assert count == 42000
+        assert source == "generate_text.py"
