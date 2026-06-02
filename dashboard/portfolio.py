@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from schema_contract import resolve_run_schema_version, warn_missing_run_schema_version
+
 PORTFOLIO_TEMPLATE = Path(__file__).with_name("portfolio_template.html")
 PORTFOLIO_DATA_MARKER = "/*__WATERMARK_PORTFOLIO_DATA__*/"
 
@@ -18,7 +20,7 @@ SKIP_DIR_NAMES = frozenset({
 })
 SKIP_DIR_PREFIXES = (".", "_")
 
-SORT_CHOICES = ("timestamp", "region", "workload", "carbon", "water", "cost", "energy")
+SORT_CHOICES = ("timestamp", "region", "workload", "carbon", "water", "wwl", "cost", "energy")
 METHODOLOGY_VERSION = "0.1.0"
 
 
@@ -117,6 +119,9 @@ def load_portfolio_run(run_dir: Path) -> dict[str, Any]:
     run_dir = run_dir.resolve()
     summary_path = run_dir / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    _, missing_version = resolve_run_schema_version(summary)
+    if missing_version:
+        warn_missing_run_schema_version(str(summary_path))
     for key in ("run_metadata", "energy", "carbon", "water", "assumptions"):
         if key not in summary:
             raise ValueError(f"invalid summary.json (missing {key!r}): {summary_path}")
@@ -134,6 +139,7 @@ def load_portfolio_run(run_dir: Path) -> dict[str, Any]:
     facility_wh = e["facility_total_kwh"] * 1000
     carbon_g = summary["carbon"]["co2e_kg"] * 1000
     water_ml = summary["water"]["total_l"] * 1000
+    wwl_ml = summary["water"].get("wwl_ml", summary["water"].get("stress_weighted_total_l", summary["water"]["total_l"]) * 1000)
     cost_usd = _run_cost(summary, workload)
     image_count = workload.get("image_count")
     units = image_count or 1
@@ -166,12 +172,14 @@ def load_portfolio_run(run_dir: Path) -> dict[str, Any]:
         "facility_wh": round(facility_wh, 1),
         "carbon_g": round(carbon_g, 1),
         "water_ml": round(water_ml, 0),
+        "wwl_ml": round(wwl_ml, 1),
         "cost_usd": cost_usd,
         "units": image_count,
         "unit_label": unit_label,
         "per_unit_wh": round(facility_wh / units, 2) if image_count else None,
         "per_unit_carbon_g": round(carbon_g / units, 2) if image_count else None,
         "per_unit_water_ml": round(water_ml / units, 1) if image_count else None,
+        "per_unit_wwl_ml": round(wwl_ml / units, 2) if image_count else None,
         "per_unit_cost_usd": round(cost_usd / units, 3) if cost_usd and image_count else None,
         "duration_s": duration_s,
         "samples": samples,
@@ -194,6 +202,8 @@ def sort_portfolio_runs(runs: list[dict], sort_by: str = "timestamp") -> list[di
         return sorted(runs, key=lambda r: r["carbon_g"], reverse=True)
     if sort_by == "water":
         return sorted(runs, key=lambda r: r["water_ml"], reverse=True)
+    if sort_by == "wwl":
+        return sorted(runs, key=lambda r: r.get("wwl_ml", r["water_ml"]), reverse=True)
     if sort_by == "cost":
         return sorted(
             runs,
@@ -461,19 +471,20 @@ def build_insights(measurement_runs: list[dict]) -> list[dict[str, Any]]:
         }]
 
     insights: list[dict[str, Any]] = []
+    total_wwl = sum(r.get("wwl_ml", r["water_ml"]) for r in measurement_runs)
     total_carbon = sum(r["carbon_g"] for r in measurement_runs)
     insights.append({
         "type": "summary",
         "text": (
-            f"{len(measurement_runs)} measurement run(s) total "
-            f"{total_carbon:.1f} g CO₂e and "
-            f"{sum(r['facility_wh'] for r in measurement_runs):.1f} Wh facility energy."
+            f"{len(measurement_runs)} measurement run(s) · "
+            f"{total_wwl:.0f} mL WWL (watershed-weighted water) · "
+            f"{total_carbon:.1f} g CO₂e (carbon context)."
         ),
     })
 
     groups: dict[tuple[str, int | None], list[dict]] = {}
     for run in measurement_runs:
-        if run.get("per_unit_carbon_g") is None:
+        if run.get("per_unit_wwl_ml") is None and run.get("per_unit_water_ml") is None:
             continue
         key = (run.get("workload_type", "other"), run.get("units"))
         groups.setdefault(key, []).append(run)
@@ -481,20 +492,31 @@ def build_insights(measurement_runs: list[dict]) -> list[dict[str, Any]]:
     for group in groups.values():
         if len(group) < 2:
             continue
-        low = min(group, key=lambda r: r["per_unit_carbon_g"])
-        high = max(group, key=lambda r: r["per_unit_carbon_g"])
-        if high["per_unit_carbon_g"] <= 0:
+        wwl_key = "per_unit_wwl_ml" if group[0].get("per_unit_wwl_ml") is not None else "per_unit_water_ml"
+        low = min(group, key=lambda r: r.get(wwl_key) or 0)
+        high = max(group, key=lambda r: r.get(wwl_key) or 0)
+        if (high.get(wwl_key) or 0) <= 0:
             continue
-        ratio = high["per_unit_carbon_g"] / max(low["per_unit_carbon_g"], 0.001)
+        ratio = (high.get(wwl_key) or 0) / max(low.get(wwl_key) or 0.001, 0.001)
         if ratio <= 1.05:
             continue
         unit = low.get("unit_label") or "unit"
+        low_carbon = min(group, key=lambda r: r.get("per_unit_carbon_g") or 0)
+        high_carbon = max(group, key=lambda r: r.get("per_unit_carbon_g") or 0)
+        carbon_ratio = (
+            (high_carbon.get("per_unit_carbon_g") or 0) / max(low_carbon.get("per_unit_carbon_g") or 0.001, 0.001)
+            if low_carbon.get("per_unit_carbon_g") else None
+        )
+        carbon_note = (
+            f" ({carbon_ratio:.1f}× carbon spread across same workload)"
+            if carbon_ratio and carbon_ratio > 1.05 else ""
+        )
         insights.append({
             "type": "regional",
             "text": (
-                f"{_region_short(high['region_label'])} emits {ratio:.1f}× more CO₂e per {unit} "
+                f"{_region_short(high['region_label'])} uses {ratio:.1f}× more WWL per {unit} "
                 f"than {_region_short(low['region_label'])} "
-                f"({high['per_unit_carbon_g']:.2f} vs {low['per_unit_carbon_g']:.2f} g)."
+                f"({high.get(wwl_key):.2f} vs {low.get(wwl_key):.2f} mL){carbon_note}."
             ),
             "low_run_id": low["run_id"],
             "high_run_id": high["run_id"],
@@ -554,6 +576,24 @@ def build_executive_summary(
         dr = summary["date_range"]
         bullets.append(f"Reporting period: {dr['earliest']} → {dr['latest']}")
     return bullets[:4]
+
+
+def build_water_carbon_scatter(measurement_runs: list[dict]) -> list[dict[str, Any]]:
+    """Per-run carbon vs watershed-weighted water for tradeoff scatter."""
+    rows = []
+    for run in measurement_runs:
+        rows.append({
+            "run_id": run["run_id"],
+            "label": run["run_id"],
+            "region": run["region"],
+            "region_label": _region_short(run["region_label"]),
+            "carbon_g": run["carbon_g"],
+            "wwl_ml": run.get("wwl_ml", run["water_ml"]),
+            "water_ml": run["water_ml"],
+            "per_unit_wwl_ml": run.get("per_unit_wwl_ml"),
+            "per_unit_carbon_g": run.get("per_unit_carbon_g"),
+        })
+    return rows
 
 
 def build_cost_carbon_chart(measurement_runs: list[dict]) -> list[dict[str, Any]]:
@@ -691,6 +731,7 @@ def build_portfolio_payload(
         "regional_per_unit_chart": build_regional_per_unit_chart(measurement_runs),
         "workload_chart": build_workload_chart(measurement_runs),
         "cost_carbon_chart": build_cost_carbon_chart(measurement_runs),
+        "water_carbon_scatter": build_water_carbon_scatter(measurement_runs),
         "trends": build_trend_series(measurement_runs),
         "compare_links": {},
     }

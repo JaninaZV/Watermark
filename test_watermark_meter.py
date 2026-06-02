@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
+import pytest
+
 import watermark_meter as wm
 
 
@@ -38,6 +42,11 @@ class TestRegionProfiles:
 
 
 class TestEmZoneMap:
+    # requires network: EM /v3/zones endpoint (live Electricity Maps zone list)
+    @pytest.mark.skipif(
+        not os.environ.get("ELECTRICITYMAPS_API_KEY"),
+        reason="requires network: EM /v3/zones endpoint (set ELECTRICITYMAPS_API_KEY to enable)",
+    )
     def test_em_zone_map_codes_exist_in_v3_zones(self):
         valid_zones = wm.fetch_em_zone_keys()
         invalid = wm.invalid_em_zone_map_entries(valid_zones)

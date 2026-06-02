@@ -1141,7 +1141,7 @@
         <!-- ===== KPI OVERVIEW (toggle + cards) ===== -->
         <div class="kpi-overview" id="overview">
           <div class="kpi-view-toggle" id="kpiViewToggle">
-            <span>Carbon &amp; water view:</span>
+            <span>Water &amp; carbon view:</span>
             <div class="kpi-view-toggle-buttons">
               <button type="button" data-view="operational" class="active">Operational</button>
               <button type="button" data-view="lifecycle">Operational + Embodied</button>
@@ -1393,14 +1393,14 @@
         description: 'IT energy was measured once in us-east-1 (US Virginia). Oregon and Sweden re-apply the same watt-hours against different regional grid carbon and water intensities — counterfactual footprints, not separate runs.',
         accountability_note: 'Public debate focuses on where data centers land and what they draw from local grids and watersheds. Watermark answers the next question: what did this specific workload cost — in energy, carbon, and water — with every assumption tagged.',
       },
-      tradeoff: { carbon_ratio_vs_cleanest: 8.7, water_ratio_cleanest_vs_measured: 2.2, cleanest_region: 'eu-north-1' },
+      tradeoff: { carbon_ratio_vs_cleanest: 8.7, water_ratio_vs_cleanest_wwl: 2.2, water_ratio_cleanest_vs_measured: 2.2, cleanest_water_region: 'us-west-2', cleanest_carbon_region: 'eu-north-1', cleanest_region: 'us-west-2' },
       warnings: [],
       publish_safe: true,
       wue_direct: 0.12,
       caveats: [
-        'Virginia values are measured on rented H100 SXM. Oregon and Sweden apply regional multipliers to the same measured energy.',
-        'Carbon and water are regional annual averages unless --grid-source electricitymaps is used for carbon.',
-        'Embodied hardware impact modeled when --hardware-sku or --hardware is recognized; amortized over useful life.',
+        { code: 'demo_regional_context', severity: 'info', message: 'Virginia values are measured on rented H100 SXM. Oregon and Sweden apply regional multipliers to the same measured energy.' },
+        { code: 'demo_grid_static', severity: 'info', message: 'Carbon and water are regional annual averages unless --grid-source electricitymaps is used for carbon.' },
+        { code: 'demo_embodied', severity: 'info', message: 'Embodied hardware impact modeled when --hardware-sku or --hardware is recognized; amortized over useful life.' },
       ],
     };
 
@@ -1643,7 +1643,8 @@
     function buildImpactKpiCards(k, data, view) {
       const trade = data.tradeoff || {};
       const gpuSeries = data.timeseries.gpu_watts || [];
-      const cleanestLabel = (data.regional.find(r => r.region === trade.cleanest_region) || {}).short_label || 'cleanest region';
+      const cleanestWater = data.regional.reduce((a, b) => ((a.wwl_ml ?? a.stress_weighted_ml) < (b.wwl_ml ?? b.stress_weighted_ml) ? a : b));
+      const cleanestCarbon = data.regional.reduce((a, b) => (a.carbon_g < b.carbon_g ? a : b));
       const carbonOp = k.carbon_operational_g ?? k.carbon_g;
       const waterOp = k.water_operational_ml ?? k.water_ml;
       const carbonEmb = k.carbon_embodied_g ?? 0;
@@ -1652,9 +1653,9 @@
       const waterLife = k.water_lifecycle_ml ?? waterOp;
       const hasEmbodied = k.has_embodied === true;
       const showLifecycle = view === 'lifecycle' && hasEmbodied;
-      const carbonBenchmark = `${k.per_image_carbon_g ? k.per_image_carbon_g + ' g/img · ' : ''}${trade.carbon_ratio_vs_cleanest || '—'}× higher than ${cleanestLabel}`;
-      const waterStressWeighted = k.water_stress_weighted_ml ?? k.water_ml;
-      const waterBenchmark = `${waterOp} mL gross · ${waterStressWeighted} mL stress-weighted · ${k.water_direct_ml} direct · ${k.water_indirect_ml} indirect${k.per_image_water_ml ? ` · ${k.per_image_water_ml} mL/img` : ''}`;
+      const carbonBenchmark = `${k.per_image_carbon_g ? k.per_image_carbon_g + ' g/img · ' : ''}${trade.carbon_ratio_vs_cleanest || '—'}× carbon vs ${cleanestCarbon.short_label || 'cleanest carbon'}`;
+      const waterStressWeighted = k.wwl_ml ?? k.water_stress_weighted_ml ?? k.water_ml;
+      const waterBenchmark = `${waterStressWeighted} mL WWL · ${waterOp} mL gross · ${k.water_direct_ml} direct · ${k.water_indirect_ml} indirect${k.per_image_wwl_ml ? ` · ${k.per_image_wwl_ml} WWL mL/unit` : ''}${k.stress_basin ? ` · ${k.stress_basin}` : ''}`;
 
       const carbonCard = showLifecycle ? {
         label: 'Carbon · CO₂e',
@@ -1678,12 +1679,13 @@
       };
 
       const waterCard = showLifecycle ? {
-        label: 'Water · Total',
+        label: 'Water · WWL',
         showDerivation: true,
         rows: [
-          { label: 'Operational', tag: data.methodology?.wue?.tag || 'modeled', value: waterOp, decimals: 0, unit: 'mL' },
+          { label: 'WWL (operational)', tag: data.methodology?.wue?.tag || 'modeled', value: waterStressWeighted, decimals: 0, unit: 'mL', emphasis: true },
+          { label: 'Gross operational', tag: 'modeled', value: waterOp, decimals: 0, unit: 'mL' },
           { label: 'Embodied', tag: 'modeled', value: waterEmb, decimals: 1, unit: 'mL' },
-          { label: 'Lifecycle', value: waterLife, decimals: 1, unit: 'mL', emphasis: true },
+          { label: 'Lifecycle', value: waterLife, decimals: 1, unit: 'mL' },
         ],
         formula: data.formulas.water,
         tip: data.tips.embodied ? `${data.tips.water} · ${data.tips.embodied}` : data.tips.water,
@@ -1691,11 +1693,12 @@
         benchmark: waterBenchmark,
         sparkline: gpuSeries,
       } : {
-        label: 'Water · Total',
+        label: 'Water · WWL',
         showDerivation: true,
-        value: waterOp, decimals: 0, unit: 'mL',
+        value: waterStressWeighted, decimals: 0, unit: 'mL',
+        subvalue: `${waterOp} mL gross`,
         formula: data.formulas.water, tip: data.tips.water,
-        anchor: waterOp < 250 ? '≈ ½ cup of drinking water' : '≈ 1 cup of drinking water',
+        anchor: waterStressWeighted < 250 ? '≈ ½ cup WWL' : '≈ 1 cup WWL',
         benchmark: waterBenchmark,
         sparkline: gpuSeries,
       };
@@ -1823,30 +1826,36 @@
     }
 
     function renderRegional(data) {
-      const cleanest = data.regional.reduce((a, b) => (a.carbon_g < b.carbon_g ? a : b));
+      const cleanestWater = data.regional.reduce((a, b) => ((a.wwl_ml ?? a.stress_weighted_ml) < (b.wwl_ml ?? b.stress_weighted_ml) ? a : b));
+      const cleanestCarbon = data.regional.reduce((a, b) => (a.carbon_g < b.carbon_g ? a : b));
       const container = document.getElementById('regional');
       container.innerHTML = data.regional.map(r => {
-        const isCleanest = r.region === cleanest.region;
+        const isCleanestWater = r.region === cleanestWater.region;
+        const isCleanestCarbon = r.region === cleanestCarbon.region;
         const badgeClass = r.is_measured_region ? 'run-region' : 'scenario';
         const panelClass = r.is_measured_region ? ' run-region' : ' scenario';
-        const cleanestTag = isCleanest ? '<span class="region-tag">CLEANEST CARBON</span>' : '';
+        const waterTag = isCleanestWater ? '<span class="region-tag stress">LOWEST WWL</span>' : '';
+        const carbonTag = isCleanestCarbon ? '<span class="region-tag">LOWEST CARBON</span>' : '';
         const stressClass = (r.stress_level === 'extremely-high' || r.stress_level === 'high') ? 'stress extreme' : 'stress';
         const stressBadge = r.stress_badge
           ? `<span class="region-tag ${stressClass}">${r.stress_badge}</span>` : '';
+        const wwl = r.wwl_ml ?? r.stress_weighted_ml ?? r.water_ml;
         return `
-          <div class="region panel${panelClass}${isCleanest ? ' cleanest' : ''}">
+          <div class="region panel${panelClass}${isCleanestWater ? ' cleanest' : ''}">
             <div class="region-name">${r.region}</div>
             <div class="region-label">
               <span>${r.short_label}</span>
               <span>
                 <span class="region-tag ${badgeClass}">${r.badge || (r.is_measured_region ? 'RUN REGION' : 'GRID SCENARIO')}</span>
                 ${stressBadge}
-                ${cleanestTag}
+                ${waterTag}
+                ${carbonTag}
               </span>
             </div>
             <div class="region-row"><span class="label">Direct WUE</span><span class="value">${r.wue_direct_l_per_kwh} L/kWh</span></div>
-            <div class="region-row"><span class="label">Carbon</span><span class="value${isCleanest ? ' highlight' : ''}">${r.carbon_g} g</span></div>
-            <div class="region-row"><span class="label">Water</span><span class="value">${r.water_ml} mL gross · ${r.stress_weighted_ml ?? r.water_ml} mL weighted</span></div>
+            <div class="region-row"><span class="label">WWL</span><span class="value${isCleanestWater ? ' highlight' : ''}">${wwl} mL</span></div>
+            <div class="region-row"><span class="label">Carbon</span><span class="value${isCleanestCarbon ? ' highlight' : ''}">${r.carbon_g} g</span></div>
+            <div class="region-row"><span class="label">Water</span><span class="value">${r.water_ml} mL gross</span></div>
             <div class="region-row"><span class="label">Grid CO₂</span><span class="value">${r.grid_co2} kg/kWh</span></div>
             <div class="region-row"><span class="label">Energy basis</span><span class="value" style="font-size:11px;color:var(--muted);">${r.is_measured_region ? 'Measured here' : 'Same IT kWh × grid'}</span></div>
             ${formatRegionContext(r.context)}
@@ -1926,7 +1935,11 @@
       }
 
       document.getElementById('caveatsList').innerHTML = (data.caveats || [])
-        .map(c => `<li>${c}</li>`).join('');
+        .map(c => {
+          const msg = typeof c === 'string' ? c : (c && c.message) || '';
+          const sev = (c && c.severity) ? ` data-severity="${c.severity}"` : '';
+          return `<li${sev}>${msg}</li>`;
+        }).join('');
     }
 
     let hdrRunStartedIso = '';
@@ -2014,14 +2027,15 @@
       const imgCount = (data.workload || {}).image_count;
       document.getElementById('waterPanelMeta').textContent =
         imgCount ? `stacked · same measured energy · per ${imgCount} images` : 'stacked · same measured IT energy across three grid scenarios';
-      const cleanest = data.regional.reduce((a, b) => (a.carbon_g < b.carbon_g ? a : b));
+      const cleanestWater = data.regional.reduce((a, b) => ((a.wwl_ml ?? a.stress_weighted_ml) < (b.wwl_ml ?? b.stress_weighted_ml) ? a : b));
+      const cleanestCarbon = data.regional.reduce((a, b) => (a.carbon_g < b.carbon_g ? a : b));
       const measured = data.regional.find(r => r.is_measured_region) || data.regional[0];
       const trade = data.tradeoff || {};
       let tradeoffText;
-      if (measured.region === cleanest.region) {
-        tradeoffText = `${cleanest.short_label} is the run region and lowest carbon · water varies by grid mix`;
+      if (measured.region === cleanestWater.region) {
+        tradeoffText = `${cleanestWater.short_label} is lowest WWL for this energy · ${cleanestCarbon.short_label} is lowest carbon — check both`;
       } else {
-        tradeoffText = `${cleanest.short_label} ${trade.carbon_ratio_vs_cleanest}× cleaner on carbon · ${trade.water_ratio_cleanest_vs_measured}× higher on water (same energy)`;
+        tradeoffText = `${cleanestCarbon.short_label} ${trade.carbon_ratio_vs_cleanest || '—'}× cleaner on carbon · ${measured.short_label} ${trade.water_ratio_vs_cleanest_wwl || trade.water_ratio_cleanest_vs_measured || '—'}× higher WWL (same energy)`;
       }
       document.getElementById('tradeoffMeta').textContent = tradeoffText;
     }

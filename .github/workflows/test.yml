@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: >-
+          python3 -m pytest
+          test_schema_contract.py
+          test_water_profile.py
+          test_dashboard.py
+          test_portfolio.py
+          test_watermark_meter.py
+          -q
+        env:
+          # EM zone validation calls /v3/zones live; skipped locally/CI when unset.
+          ELECTRICITYMAPS_API_KEY: ${{ secrets.ELECTRICITYMAPS_API_KEY }}

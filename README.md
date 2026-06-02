@@ -1,14 +1,16 @@
 # Watermark Meter
 
-**Measure the true energy, carbon, and water cost of AI workloads — with every assumption auditable.**
+**Measure compute's water cost — direct, indirect, and watershed-weighted — with every assumption auditable.**
 
-> **Status:** v0.1 · methodology-first · public preview
+> **Status:** v0.2 · water-first · methodology-first · public preview
 
-Watermark is an open-source CLI that meters a running workload and produces
-reproducible footprint reports: per-sample readings, aggregated totals, and
-interactive HTML dashboards. It reads hardware where possible (RAPL, NVML) and
-models the rest from published regional constants — tagging every number with
-its source so reviewers can challenge or replace any assumption.
+Watermark is an open-source CLI that meters AI/compute workloads and answers a
+question most footprint tools skip: **what did this job cost in water, and was
+that water drawn from a stressed basin?** It measures energy (RAPL/NVML) and
+models water in two channels — datacenter cooling (WUE) and electricity
+generation — then reports **Watershed-Weighted Liters (WWL)** as the canonical
+water unit. Carbon is included for context, especially the carbon–water tradeoff
+(e.g. Nordic hydropower: low carbon, high indirect water).
 
 **Quick start**
 
@@ -17,41 +19,57 @@ pip install -e .
 watermark --help
 ```
 
-Full methodology: [`METHODOLOGY.md`](./METHODOLOGY.md) · License: [Apache 2.0](./LICENSE) ·
-Contributions: [CONTRIBUTING.md](./CONTRIBUTING.md)
+Full methodology: [`METHODOLOGY.md`](./METHODOLOGY.md) · Schema: [`SCHEMA.md`](./SCHEMA.md) · License: [Apache 2.0](./LICENSE)
 
 ---
 
-## What's in scope for v0.1
+## Why water first
 
-- **Energy** — CPU (RAPL or utilization×TDP) + GPU (NVML / nvidia-smi), integrated over time
-- **Carbon** — operational CO₂e from regional grid intensity (EPA eGRID + IEA static profiles)
-- **Water** — direct cooling (WUE) + indirect generation water (NREL / USGS)
-- **Watershed stress** — WRI Aqueduct basin weighting on operational water totals
-- **Embodied impact** — optional amortized manufacturing carbon/water via `--hardware-sku`
-- **Comparison** — same workload across regions; side-by-side run dashboards and portfolio view
-- **Audit trail** — `measurements.csv`, `summary.json`, `report.md`, auto-generated `dashboard.html`
+Every "green AI" story picks a region for low carbon. **Watermark shows what that
+choice costs in water.** Sweden can be 8× cleaner on carbon than Virginia but
+2× higher on watershed-weighted water for the same measured energy — because
+hydropower grids carry large indirect water footprints.
+
+```bash
+# Hero comparison — same workload, three regions
+watermark --region us-east-1 --duration 60 --output ./run_va
+watermark --region eu-north-1 --duration 60 --output ./run_se
+watermark --region us-west-1 --duration 60 --output ./run_or
+watermark portfolio ./experiments --output portfolio.html
+```
+
+You optimized for carbon. **Did you check water?**
+
+---
+
+## What's in scope for v0.2
+
+- **Energy** — CPU (RAPL or utilization×TDP) + GPU (NVML / nvidia-smi)
+- **Water (primary)** — direct cooling (WUE) + indirect generation water → **WWL**
+- **Watershed stress** — WRI Aqueduct basin weighting (seasonal uplift where modeled)
+- **Cooling type** — `--cooling-system` adjusts direct WUE (evaporative, air, liquid, immersion)
+- **Carbon (context)** — operational CO₂e; optional ElectricityMaps realtime
+- **Embodied impact** — optional amortized manufacturing water/carbon via `--hardware-sku`
+- **Comparison** — regional scenarios + portfolio with carbon vs WWL scatter
+- **Audit trail** — `summary.json`, `measurements.csv`, `dashboard.html`
 
 ## What's not yet supported
 
-- Per-process attribution (no eBPF / Kepler-style PID scope — planned v0.3)
-- Real-time grid carbon as default (ElectricityMaps optional via env var; static table is default)
-- Hosted multi-tenant SaaS or always-on observability agent
-- Full ISO product LCA for embodied impact (preview amortization only)
-- Memory, network, and storage power as separate measured channels
+- Direct water metering (no flow sensor — energy × coefficients, honestly labeled)
+- Live water intensity APIs (architecture seam exists; static tables default)
+- Operator disclosure ingestion pipeline
+- Per-process attribution (planned v0.3)
 
 ---
 
-Unlike a one-liner that multiplies `cpu_percent` by an invented wattage, this tool:
+Unlike carbon-only calculators, Watermark:
 
-- reads CPU energy from Intel/AMD RAPL hardware counters when available
-- reads GPU power from NVIDIA NVML / nvidia-smi when a GPU is present
-- applies a regional PUE for cooling overhead
-- applies a regional grid carbon intensity (kgCO₂e per kWh) from EPA eGRID + IEA
-- applies both direct cooling water (WUE) and indirect generation water (NREL/USGS)
-- applies optional WRI Aqueduct watershed-stress weighting on operational water
-- supports optional embodied carbon/water when `--hardware-sku` is set
-- tags every output line with whether the underlying number was measured or modeled
+- splits water into **direct cooling** (regional WUE) and **indirect generation** (grid mix)
+- reports **Watershed-Weighted Liters (WWL)** — gross water × (1 + basin stress score)
+- surfaces the **carbon–water tradeoff** when comparing cloud regions
+- adjusts direct WUE when you pass `--cooling-system` (operator knowledge beats any API)
+- reads CPU/GPU **energy** from hardware where possible; water is modeled honestly, not faked
+- tags every line with source and emits structured caveats (`summary.json`)
 
 ## Install
 
@@ -168,7 +186,7 @@ python -m dashboard ./my_run \
   --facility-location "US East (cloud provider)"
 ```
 
-### Per-run dashboard (v0.1)
+### Per-run dashboard (v0.2)
 
 - KPI cards with per-unit toggle; lifecycle totals when `--hardware-sku` set
 - Power time series, regional counterfactual panels, scale context

@@ -36,8 +36,13 @@ dev = ["pytest"]
 watermark = "watermark_meter:main"
 
 [tool.setuptools]
-py-modules = ["watermark_meter"]
+py-modules = ["watermark_meter", "schema_contract"]
 packages = ["dashboard"]
 
 [tool.setuptools.package-data]
 dashboard = ["dashboard_template.html", "portfolio_template.html"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that require live external services (see skip conditions on each test)",
+]

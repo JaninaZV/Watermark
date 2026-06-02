@@ -25,9 +25,11 @@ from watermark_meter import (
     CARBON_SOURCE_EM,
     CARBON_SOURCE_STATIC,
     compute_impacts,
+    fetch_water_profile,
     static_grid_profile,
     stress_badge_label,
 )
+from schema_contract import resolve_run_schema_version, warn_missing_run_schema_version
 
 # Single source of truth for dashboard UI — meter injects JSON at generation time.
 DASHBOARD_TEMPLATE = Path(__file__).with_name("dashboard_template.html")
@@ -388,31 +390,39 @@ def _comparison_regions(measured_region: str) -> list[str]:
 
 
 def build_regional_comparison(it_kwh: float, facility_kwh: float,
-                              measured_region: str) -> list[dict]:
+                              measured_region: str,
+                              cooling_type: str = "unknown") -> list[dict]:
     """
     Same measured IT energy applied to comparison regions (static grid profiles).
     Each region uses its own vendor-published or estimated WUE for direct water.
     """
     rows = []
     for region in _comparison_regions(measured_region):
-        profile = static_grid_profile(region)
-        wue_direct = profile["wue_direct_l_per_kwh"]
-        impacts = compute_impacts(it_kwh, facility_kwh, profile, wue_direct)
+        grid_profile = static_grid_profile(region)
+        water_profile = fetch_water_profile(
+            region,
+            cooling_type=cooling_type,
+        )
+        wue_direct = water_profile["wue_direct_l_per_kwh"]
+        impacts = compute_impacts(
+            it_kwh, facility_kwh, grid_profile, water_profile, wue_direct=wue_direct,
+        )
         is_measured = region == measured_region
         ctx = REGION_CONTEXT.get(region, {})
         rows.append({
             "region": region,
-            "chart_label": REGION_CHART_LABELS.get(region, profile.get("label", region)),
-            "short_label": profile["label"].split("(")[0].strip(),
+            "chart_label": REGION_CHART_LABELS.get(region, grid_profile.get("label", region)),
+            "short_label": grid_profile["label"].split("(")[0].strip(),
             "carbon_g": round(impacts["carbon"]["co2e_kg"] * 1000, 2),
             "water_ml": round(impacts["water"]["total_l"] * 1000, 1),
-            "stress_weighted_ml": round(impacts["water"]["stress_weighted_total_l"] * 1000, 1),
+            "stress_weighted_ml": round(impacts["water"]["wwl_ml"], 1),
+            "wwl_ml": round(impacts["water"]["wwl_ml"], 1),
             "direct_ml": round(impacts["water"]["direct_cooling_l"] * 1000, 1),
             "indirect_ml": round(impacts["water"]["indirect_generation_l"] * 1000, 1),
-            "grid_co2": profile["co2_kg_per_kwh"],
-            "grid_water": profile["water_l_per_kwh"],
+            "grid_co2": grid_profile["co2_kg_per_kwh"],
+            "grid_water": water_profile["water_l_per_kwh"],
             "wue_direct_l_per_kwh": wue_direct,
-            "wue_source": profile.get("wue_source", "region_default"),
+            "wue_source": water_profile.get("wue_source", "region_default"),
             "stress_score": impacts["water"]["stress_score"],
             "stress_level": impacts["water"]["stress_level"],
             "stress_basin": impacts["water"]["stress_basin"],
@@ -453,9 +463,11 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
 
     carbon_g = summary["carbon"]["co2e_kg"] * 1000
     water_ml = w["total_l"] * 1000
-    stress_weighted_ml = w.get("stress_weighted_total_l", w["total_l"]) * 1000
+    wwl_ml = w.get("wwl_ml", w.get("stress_weighted_total_l", w["total_l"]) * 1000)
+    stress_weighted_ml = wwl_ml
     direct_ml = w["direct_cooling_l"] * 1000
     indirect_ml = w["indirect_generation_l"] * 1000
+    wwl_per_unit_ml = w.get("wwl_per_unit_ml")
 
     embodied = summary.get("embodied", {})
     lifecycle = summary.get("lifecycle", {})
@@ -465,12 +477,20 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
     lifecycle_water_ml = lifecycle.get("water", {}).get("total_l", w["total_l"]) * 1000
     has_embodied = embodied.get("source") == "modeled"
 
-    regional = build_regional_comparison(it_kwh, facility_kwh, a["region"])
+    regional = build_regional_comparison(
+        it_kwh, facility_kwh, a["region"],
+        cooling_type=a.get("cooling_type", "unknown"),
+    )
     measured_row = next(r for r in regional if r["is_measured_region"])
-    cleanest = min(regional, key=lambda r: r["carbon_g"])
+    cleanest_water = min(regional, key=lambda r: r["wwl_ml"])
+    cleanest_carbon = min(regional, key=lambda r: r["carbon_g"])
     carbon_ratio = (
-        measured_row["carbon_g"] / cleanest["carbon_g"]
-        if cleanest["carbon_g"] > 0 else 1.0
+        measured_row["carbon_g"] / cleanest_carbon["carbon_g"]
+        if cleanest_carbon["carbon_g"] > 0 else 1.0
+    )
+    water_ratio = (
+        measured_row["wwl_ml"] / cleanest_water["wwl_ml"]
+        if cleanest_water["wwl_ml"] > 0 else 1.0
     )
 
     cpu_method, cpu_tag = _cpu_methodology_text(meas, a["cpu_tdp_fallback_w"])
@@ -501,7 +521,7 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
     })
 
     return {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
         "run": {
             "id": run_id,
             "region": a["region"],
@@ -534,6 +554,7 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
             "carbon_operational_g": round(carbon_g, 1),
             "carbon_embodied_g": round(embodied_carbon_g, 2),
             "carbon_lifecycle_g": round(lifecycle_carbon_g, 2),
+            "wwl_ml": round(wwl_ml, 1),
             "water_ml": round(water_ml, 0),
             "water_stress_weighted_ml": round(stress_weighted_ml, 0),
             "water_operational_ml": round(water_ml, 0),
@@ -547,9 +568,14 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
             "cooling_wh": round(cooling_wh, 1),
             "per_image_wh": round(facility_wh / image_count, 2) if image_count else None,
             "per_image_carbon_g": round(carbon_g / image_count, 2) if image_count else None,
+            "per_image_wwl_ml": round(wwl_per_unit_ml, 2) if wwl_per_unit_ml is not None else (
+                round(wwl_ml / image_count, 2) if image_count else None
+            ),
             "per_image_water_ml": round(water_ml / image_count, 2) if image_count else None,
             "per_image_cost_usd": round(cost_usd / image_count, 3) if cost_usd and image_count else None,
             "has_embodied": has_embodied,
+            "stress_basin": w.get("stress_basin"),
+            "stress_level": w.get("stress_level"),
         },
         "embodied": embodied,
         "lifecycle": lifecycle,
@@ -574,12 +600,12 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
                 f"≈ {carbon_g:.1f} g"
             ),
             "water": (
+                f"WWL = gross × (1 + stress)\n"
                 f"direct (WUE × IT) + indirect (grid × facility)\n"
                 f"= {it_kwh:.6f} × {a['wue_direct_l_per_kwh']} + "
                 f"{facility_kwh:.6f} × {a['grid_water_l_per_kwh']}\n"
-                f"= {direct_ml:.1f} + {indirect_ml:.1f} mL\n"
-                f"≈ {water_ml:.0f} mL gross\n"
-                f"× (1 + {w.get('stress_score', 0)}) stress → {stress_weighted_ml:.0f} mL weighted"
+                f"≈ {water_ml:.0f} mL gross × (1 + {w.get('stress_score', 0)})\n"
+                f"= {stress_weighted_ml:.0f} mL WWL ({w.get('stress_basin', 'basin')})"
             ),
             "gpu_avg": (
                 f"it_gpu_wh ÷ duration\n"
@@ -668,11 +694,19 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
         ],
         "tradeoff": {
             "carbon_ratio_vs_cleanest": round(carbon_ratio, 1),
+            "water_ratio_vs_cleanest_wwl": round(water_ratio, 1),
             "water_ratio_cleanest_vs_measured": round(
-                cleanest["water_ml"] / measured_row["water_ml"], 1,
-            ) if measured_row["water_ml"] > 0 else 1.0,
-            "cleanest_region": cleanest["region"],
+                cleanest_water["wwl_ml"] / measured_row["wwl_ml"], 1,
+            ) if measured_row["wwl_ml"] > 0 else 1.0,
+            "cleanest_water_region": cleanest_water["region"],
+            "cleanest_carbon_region": cleanest_carbon["region"],
+            "cleanest_region": cleanest_water["region"],
         },
+        "next_steps": (
+            "Compare regions for water–carbon tradeoffs: run the same workload in us-east-1, "
+            "eu-north-1, and us-west-1, then `watermark portfolio <dir>`. "
+            "You optimized for carbon. Did you check water?"
+        ),
         "warnings": warnings,
         "publish_safe": publish_safe,
         "assumptions": a,
@@ -718,6 +752,9 @@ def load_compare_run(compare_path: Path) -> tuple[dict, list[dict], dict | None]
         raise FileNotFoundError(f"summary not found: {summary_path}")
 
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    _, missing_version = resolve_run_schema_version(summary)
+    if missing_version:
+        warn_missing_run_schema_version(str(summary_path))
     for key in ("run_metadata", "energy", "carbon", "water", "assumptions"):
         if key not in summary:
             raise ValueError(f"invalid summary.json (missing {key!r}): {summary_path}")

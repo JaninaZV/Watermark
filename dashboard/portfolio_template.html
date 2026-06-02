@@ -874,6 +874,11 @@
         <p class="chart-hint">Click a bar to filter the runs table by workload</p>
         <div class="chart-box"><canvas id="workloadChart"></canvas></div>
       </section>
+      <section class="panel chart-full" id="waterCarbonPanel">
+        <h2>Carbon vs watershed-weighted water</h2>
+        <p class="panel-subtitle">Each dot is a run — low carbon can still mean high WWL (e.g. hydropower grids)</p>
+        <div class="chart-box"><canvas id="waterCarbonChart"></canvas></div>
+      </section>
       <section class="panel chart-full" id="costCarbonPanel">
         <h2>Cost vs carbon</h2>
         <p class="panel-subtitle">Compute cost vs total carbon per measurement run</p>
@@ -1875,6 +1880,48 @@
       });
     }
 
+    function renderWaterCarbonScatter() {
+      const rows = DATA.water_carbon_scatter || [];
+      const panel = document.getElementById('waterCarbonPanel');
+      const ctx = document.getElementById('waterCarbonChart');
+      if (!rows.length || !ctx) {
+        if (panel) panel.hidden = true;
+        return;
+      }
+      if (panel) panel.hidden = false;
+      if (charts.waterCarbon) charts.waterCarbon.destroy();
+      charts.waterCarbon = new Chart(ctx, {
+        type: 'scatter',
+        data: {
+          datasets: [{
+            label: 'Runs',
+            data: rows.map(r => ({ x: r.carbon_g, y: r.wwl_ml, run_id: r.run_id, region: r.region_label })),
+            backgroundColor: 'rgba(88, 166, 255, 0.75)',
+            pointRadius: 6,
+          }],
+        },
+        options: {
+          ...chartDefaults(),
+          scales: {
+            x: { title: { display: true, text: 'Carbon (g CO₂e)', color: '#7d8590' }, ticks: { color: '#4fd1c5' }, grid: { color: '#1f2630' } },
+            y: { title: { display: true, text: 'WWL (mL)', color: '#7d8590' }, ticks: { color: '#58a6ff' }, grid: { color: '#1f2630' } },
+          },
+          plugins: {
+            ...chartDefaults().plugins,
+            title: { display: true, text: 'Water–carbon tradeoff by run', color: '#7d8590', font: { size: 11 } },
+            tooltip: {
+              callbacks: {
+                label: (ctx) => {
+                  const p = ctx.raw;
+                  return `${p.run_id}: ${p.x} g CO₂e · ${p.y} mL WWL (${p.region})`;
+                },
+              },
+            },
+          },
+        },
+      });
+    }
+
     function renderCostCarbonChart() {
       const rows = DATA.cost_carbon_chart || [];
       const panel = document.getElementById('costCarbonPanel');
@@ -1937,6 +1984,9 @@
       }
       try { renderWorkloadChart(); } catch (err) {
         console.error('[watermark portfolio] workload chart failed:', err);
+      }
+      try { renderWaterCarbonScatter(); } catch (err) {
+        console.error('[watermark portfolio] water/carbon scatter failed:', err);
       }
       try { renderCostCarbonChart(); } catch (err) {
         console.error('[watermark portfolio] cost/carbon chart failed:', err);

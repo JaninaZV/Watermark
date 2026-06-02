@@ -107,7 +107,35 @@ When `--hardware-sku` is set (e.g. `h100-sxm`, `a100`), the meter amortizes publ
 
 ### Water consumption
 
-Water is split into two components with **different energy bases**, because WUE and generation-water intensity are defined against different denominators in the source literature.
+Watermark does **not** read a flow meter. It models water from measured energy using
+published coefficients — and tags whether each component is direct (facility) or
+indirect (grid).
+
+#### Consumption vs withdrawal
+
+Datacenters often report **withdrawal** (water drawn from a source) and
+**consumption** (water evaporated or otherwise not returned) as different numbers.
+They are not comparable. Watermark's modeled totals are **consumption-equivalent**
+volumes unless an operator source declares otherwise. Every run records
+`water_accounting_method` (`consumption`, `withdrawal`, or `unknown`; default
+`unknown`). Treat `unknown` as a warning — the value may over- or under-state
+facility impact depending on how the site reports water.
+
+#### Watershed-Weighted Liters (WWL)
+
+Carbon has gCO₂e as a normalized unit. Watermark's canonical water unit is **WWL**
+(Watershed-Weighted Liters):
+
+```
+WWL = total_operational_water_l × (1 + basin_stress_score)
+```
+
+WWL combines direct + indirect operational water with a modest WRI Aqueduct
+baseline stress multiplier. It is a **context index**, not a precise social cost
+of water. Gross liters remain in output for transparency.
+
+Water is split into two components with **different energy bases**, because WUE and
+generation-water intensity are defined against different denominators in the source literature.
 
 **Direct cooling water** — on-site water evaporated or consumed for cooling — uses WUE (Water Usage Effectiveness), expressed in liters per kWh of **IT energy**:
 
@@ -159,7 +187,27 @@ The multiplier is intentionally modest: at `stress_score = 1.0` (extremely high)
 - The weighting applies to **operational water only** (direct + indirect). Embodied manufacturing water is not stress-weighted in v0.1.
 - Indirect generation water is attributed to the **grid region**, not to the power plant's local watershed — a known simplification.
 
-Tagged `multiplier_1_plus_score, see methodology` in `summary.json` under `water.weighting_methodology`.
+Tagged `multiplier_1_plus_score, see methodology` in `summary.json` under
+`water.weighting_methodology`. The primary KPI field is `water.wwl_ml`.
+
+**Seasonal stress (v0.2):** basin stress may be uplifted by season using static
+regional multipliers (run timestamp → meteorological season). Recorded in
+`assumptions.water_stress_season` and `assumptions.water_stress_as_of`.
+
+**Cooling type (v0.2):** `--cooling-system` scales direct WUE (evaporative = 1×
+regional default; air/dry ≈ 0.35×; liquid/immersion ≈ 0.08–0.10×). Stored as
+`assumptions.cooling_type`.
+
+### Water data architecture
+
+Carbon has ElectricityMaps as a de facto live reference. **Water has no equivalent
+yet.** Watermark still provides `fetch_water_profile()` — the same progressive
+enhancement seam as `fetch_grid_profile()`:
+
+- `static` (default): regional WUE + Aqueduct + seasonal multipliers, offline
+- `operator` (reserved): facility-reported disclosures with explicit accounting method
+
+This is intentional: the seam exists before the APIs do.
 
 ## Aggregation pipeline
 
