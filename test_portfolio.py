@@ -178,6 +178,7 @@ class TestPortfolioDiscovery:
         assert summary["total_facility_wh"] == pytest.approx(98.8, abs=0.2)
         assert summary["total_carbon_g"] == pytest.approx(18.8, abs=0.2)
         assert summary["total_water_ml"] == pytest.approx(215.0, abs=1.0)
+        assert summary["total_wwl_ml"] == pytest.approx(215.0, abs=1.0)
         assert set(summary["regions"]) == {"us-east-1", "eu-north-1"}
         assert summary["date_range"]["earliest"] == "2026-05-30"
         assert summary["date_range"]["latest"] == "2026-05-31"

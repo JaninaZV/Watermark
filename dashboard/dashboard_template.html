@@ -1148,9 +1148,9 @@
             </div>
           </div>
           <div class="kpi-strip">
-            <div class="kpi" data-kpi="facility"></div>
-            <div class="kpi" data-kpi="carbon"></div>
             <div class="kpi" data-kpi="water"></div>
+            <div class="kpi" data-kpi="carbon"></div>
+            <div class="kpi" data-kpi="facility"></div>
             <div class="kpi cost" data-kpi="cost"></div>
             <div class="kpi" data-kpi="gpu"></div>
           </div>
@@ -1486,9 +1486,9 @@
       const pk = primary.kpi;
       const ck = comparison.kpi;
       const metrics = [
-        { key: 'facility_wh', label: 'Energy', unit: 'Wh', decimals: 1 },
+        { key: 'wwl_ml', label: 'Water · WWL', unit: 'mL', decimals: 0, fallback: 'water_ml' },
         { key: 'carbon_g', label: 'Carbon', unit: 'g CO₂e', decimals: 1 },
-        { key: 'water_ml', label: 'Water', unit: 'mL', decimals: 0 },
+        { key: 'facility_wh', label: 'Energy', unit: 'Wh', decimals: 1 },
       ];
       if (pk.cost_usd != null || ck.cost_usd != null) {
         metrics.push({ key: 'cost_usd', label: 'Cost', unit: 'USD', decimals: 2, prefix: '$' });
@@ -1497,8 +1497,8 @@
       const grid = document.getElementById('compareGrid');
       if (!grid) return;
       grid.innerHTML = metrics.map(m => {
-        const pv = pk[m.key];
-        const cv = ck[m.key];
+        const pv = pk[m.key] ?? (m.fallback ? pk[m.fallback] : null);
+        const cv = ck[m.key] ?? (m.fallback ? ck[m.fallback] : null);
         const pct = pctDelta(pv, cv);
         const deltaCls = deltaClass(pct);
         const prefix = m.prefix || '';

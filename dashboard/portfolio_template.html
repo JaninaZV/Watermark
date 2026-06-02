@@ -1525,9 +1525,9 @@
       const scanned = DATA.meta?.total_runs_scanned ?? allRuns.length;
       document.getElementById('summaryKpis').innerHTML = `
         <div class="kpi"><div class="label">Measurement runs</div><div class="value mono">${s.run_count || 0}</div></div>
+        <div class="kpi"><div class="label">Total WWL</div><div class="value mono">${fmtNum(s.total_wwl_ml ?? s.total_water_ml, 0)}<span class="unit">mL</span></div></div>
         <div class="kpi"><div class="label">Total energy</div><div class="value mono">${fmtNum(s.total_facility_wh)}<span class="unit">Wh</span></div></div>
         <div class="kpi"><div class="label">Total carbon</div><div class="value mono">${fmtNum(s.total_carbon_g)}<span class="unit">g</span></div></div>
-        <div class="kpi"><div class="label">Total water</div><div class="value mono">${fmtNum(s.total_water_ml, 0)}<span class="unit">mL</span></div></div>
         <div class="kpi"><div class="label">Total cost</div><div class="value mono">${s.total_cost_usd != null ? '$' + fmtNum(s.total_cost_usd, 2) : '—'}</div></div>
       `;
       const chips = [];

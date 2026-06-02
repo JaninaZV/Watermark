@@ -222,6 +222,7 @@ def aggregate_portfolio_summary(runs: list[dict]) -> dict[str, Any]:
             "total_facility_wh": 0,
             "total_carbon_g": 0,
             "total_water_ml": 0,
+            "total_wwl_ml": 0,
             "total_cost_usd": None,
             "date_range": None,
             "regions": [],
@@ -245,6 +246,7 @@ def aggregate_portfolio_summary(runs: list[dict]) -> dict[str, Any]:
     return {
         "run_count": len(runs),
         "total_facility_wh": round(sum(r["facility_wh"] for r in runs), 1),
+        "total_wwl_ml": round(sum(r.get("wwl_ml", r["water_ml"]) for r in runs), 0),
         "total_carbon_g": round(sum(r["carbon_g"] for r in runs), 1),
         "total_water_ml": round(sum(r["water_ml"] for r in runs), 0),
         "total_cost_usd": round(sum(costs), 2) if costs else None,
