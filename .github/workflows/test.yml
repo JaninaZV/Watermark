@@ -21,6 +21,7 @@ jobs:
       - name: Run tests
         run: >-
           python3 -m pytest
+          test_v03_trust.py
           test_schema_contract.py
           test_water_profile.py
           test_dashboard.py

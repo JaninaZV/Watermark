@@ -142,11 +142,16 @@ def load_portfolio_run(run_dir: Path) -> dict[str, Any]:
     wwl_ml = summary["water"].get("wwl_ml", summary["water"].get("stress_weighted_total_l", summary["water"]["total_l"]) * 1000)
     cost_usd = _run_cost(summary, workload)
     image_count = workload.get("image_count")
-    units = image_count or 1
     workload_name = workload.get("name") or workload.get("run_id") or run_dir.name
     run_id = workload.get("run_id") or run_dir.name
     workload_type = _infer_workload_type(workload_name, run_id)
     unit_label = _unit_label(workload_type)
+    per_unit = summary.get("per_unit") or {}
+    units = image_count or 1
+    if per_unit.get("unit_count"):
+        units = per_unit["unit_count"]
+        unit_label = per_unit.get("unit_type", unit_label)
+    workload_class = rm.get("workload_type", "unknown")
     hardware = workload.get("hardware") or a.get("hardware_sku") or "—"
     hardware_sku = a.get("hardware_sku") or workload.get("hardware_sku")
 
@@ -165,6 +170,7 @@ def load_portfolio_run(run_dir: Path) -> dict[str, Any]:
         "timestamp_sort": _parse_ts(ts),
         "workload": workload_name,
         "workload_type": workload_type,
+        "workload_class": workload_class,
         "region": a.get("region", ""),
         "region_label": _region_display(summary, workload),
         "hardware": hardware,
@@ -484,15 +490,56 @@ def build_insights(measurement_runs: list[dict]) -> list[dict[str, Any]]:
         ),
     })
 
-    groups: dict[tuple[str, int | None], list[dict]] = {}
+    groups: dict[tuple[str, int | None, str], list[dict]] = {}
     for run in measurement_runs:
         if run.get("per_unit_wwl_ml") is None and run.get("per_unit_water_ml") is None:
             continue
-        key = (run.get("workload_type", "other"), run.get("units"))
+        key = (
+            run.get("workload_type", "other"),
+            run.get("units"),
+            run.get("workload_class", "unknown"),
+        )
         groups.setdefault(key, []).append(run)
+
+    workload_classes = {r.get("workload_class", "unknown") for r in measurement_runs if r.get("is_measurement_run")}
+    if "training" in workload_classes and "inference" in workload_classes:
+        insights.append({
+            "type": "warning",
+            "text": (
+                "Portfolio mixes training and inference runs — per-unit comparisons are not "
+                "directly comparable without filtering by workload_class."
+            ),
+        })
+
+    import watermark_meter as wm
+
+    for region in ("us-west-1", "us-west-2", "ap-south-1"):
+        region_runs = [r for r in measurement_runs if r.get("region") == region]
+        if not region_runs:
+            continue
+        annual = wm.fetch_water_profile(region, water_stress_season="annual")
+        summer = wm.fetch_water_profile(region, water_stress_season="summer")
+        annual_score = annual["water_stress_score"]
+        summer_score = summer["water_stress_score"]
+        if annual_score <= 0:
+            continue
+        ratio = (1 + summer_score) / (1 + annual_score)
+        if ratio >= 1.1:
+            label = region_runs[0]["region_label"].split("·")[0].strip()
+            insights.append({
+                "type": "seasonal",
+                "text": (
+                    f"Peak-season (summer) WWL for {label} would be ~{ratio:.1f}× "
+                    f"annual-average stress weighting — Q3 runs may understate impact."
+                ),
+            })
+            break
 
     for group in groups.values():
         if len(group) < 2:
+            continue
+        classes = {r.get("workload_class", "unknown") for r in group}
+        if len(classes) > 1:
             continue
         wwl_key = "per_unit_wwl_ml" if group[0].get("per_unit_wwl_ml") is not None else "per_unit_water_ml"
         low = min(group, key=lambda r: r.get(wwl_key) or 0)

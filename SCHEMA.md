@@ -20,12 +20,16 @@ Python modules.
 ### Current version
 
 ```json
-"schema_version": "0.2"
+"schema_version": "0.3"
 ```
 
-v0.2 is **water-first**: adds WWL (Watershed-Weighted Liters), `water_accounting_method`,
-seasonal stress metadata, `cooling_type`, and `fetch_water_profile()` seam fields.
-Parsers for `0.1` should treat missing WWL fields as legacy (use `stress_weighted_total_l`).
+v0.3 is **enterprise trust**: adds `measurement_grade`, `grade_limiting_factor`,
+`methodology_hash`, `per_unit` normalization, operator disclosure provenance,
+`gpu_water_fraction`, and `workload_type`. v0.2 parsers should continue across
+minor bumps; missing v0.3 fields degrade gracefully with warnings.
+
+v0.2 was **water-first**: WWL, `water_accounting_method`, seasonal stress,
+`cooling_type`, and `fetch_water_profile()` seam fields.
 
 ### Missing `schema_version`
 
@@ -63,6 +67,9 @@ Existing parsers built for `0.1` must continue to work across minor bumps.
 | `lifecycle` | object | Operational + embodied rollups |
 | `assumptions` | object | Region, PUE/WUE, grid profile inputs |
 | `caveats` | array | Structured methodology limitations (see below) |
+| `measurement_grade` | `"A"` \| `"B"` \| `"C"` | v0.3 — worst-condition confidence rollup |
+| `grade_limiting_factor` | string \| null | v0.3 — required when grade is B or C |
+| `per_unit` | object \| null | v0.3 — normalized WWL/energy/carbon (see below) |
 
 ### `run_metadata`
 
@@ -75,6 +82,35 @@ Existing parsers built for `0.1` must continue to work across minor bumps.
 | `host_os` | string | yes |
 | `rapl_platform` | string \| null | yes |
 | `scope` | string (`host` in v0.1) | yes |
+| `workload_type` | `training` \| `inference` \| `benchmark` \| `unknown` | v0.3 yes |
+| `methodology_hash` | string | v0.3 — `sha256:` digest of METHODOLOGY.md at run time |
+
+### Measurement grades (v0.3)
+
+| Grade | Conditions |
+|-------|------------|
+| **A** | RAPL/NVML measured + known region + known cooling + water profile with declared `accounting_method` (not `unknown`) + explicit PUE/WUE |
+| **B** | Modeled CPU/GPU + known region + no grade-C limiting factors |
+| **C** | Any of: `cooling_type_unknown`, `default_pue`, `default_wue`, `rapl_interrupted`, `host_measurement_unavailable`, `region_unknown` |
+
+Grade reflects the **worst** condition during the run (floor, not ceiling). RAPL available
+at start but interrupted mid-run → `rapl_interrupted` → grade C.
+
+`grade_limiting_factor` enum: `cooling_type_unknown`, `rapl_interrupted`, `cpu_modeled`,
+`gpu_not_measured`, `default_pue`, `default_wue`, `water_accounting_unknown`,
+`region_unknown`, `host_measurement_unavailable`.
+
+### `per_unit` (v0.3)
+
+Present when `--token-count`, `--request-count`, `--training-steps`, or `--image-count` is set.
+
+| Field | Type |
+|-------|------|
+| `unit_type` | `token` \| `image` \| `request` \| `training_step` |
+| `unit_count` | integer |
+| `wwl_ml_per_unit` | number |
+| `energy_wh_per_unit` | number |
+| `carbon_g_per_unit` | number |
 
 ### `measured_sources`
 
@@ -539,3 +575,26 @@ defined in the Run Artifact Schema section above.
   "compare_links": {}
 }
 ```
+
+---
+
+## Comparison Artifact Schema (`comparison.json`)
+
+### Current version
+
+```json
+"schema_version": "0.1-comparison"
+```
+
+Produced by `watermark compare-regions`. Holds per-region projected footprints for the
+same reference IT energy — designed for carbon/water inversion analysis.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workload` | string | Reference workload key (`embeddings`, `images`, `text`, `benchmark`) |
+| `reference_energy` | object | `it_kwh`, `pue`, `cooling_type`, `water_source`, `grid_source` |
+| `regions` | array | Per-region `facility_wh`, `carbon_g`, `wwl_ml`, `measurement_grade` |
+| `winners` | object | `lowest_carbon_region`, `lowest_wwl_region` |
+| `water_carbon_inversion` | boolean | true when lowest-carbon ≠ lowest-WWL region |
+| `tradeoff_narrative` | string \| null | Machine-readable ratio narrative |
+| `assumptions_consistent` | boolean | false if water/carbon sources differ across regions |

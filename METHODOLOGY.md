@@ -353,5 +353,42 @@ The principal sources behind the constants in this tool are:
 Critical math and dashboard/portfolio behavior are covered by `test_dashboard.py` and `test_portfolio.py` (44 tests). Dev install: `pip install -e ".[dev]"`. Run:
 
 ```
-python3 -m pytest test_dashboard.py test_portfolio.py -q
+python3 -m pytest test_v03_trust.py test_schema_contract.py test_dashboard.py test_portfolio.py -q
 ```
+
+## v0.3 enterprise trust (additive)
+
+### Measurement grades
+
+Runs emit `measurement_grade` (A/B/C) reflecting the **worst** measurement condition
+during the run. Grade C triggers include default PUE/WUE, unknown cooling type,
+RAPL interruption, and cloud VM hosts without RAPL. See `SCHEMA.md` for tier definitions.
+
+### Operator disclosures
+
+`operator_disclosures.json` holds self-reported hyperscaler WUE values with mandatory
+`accounting_method` (`consumption` | `withdrawal`). Withdrawal disclosures emit a
+structured caveat — withdrawal ≠ consumption. `disclosure_verified` defaults to false.
+
+Pass `--water-source operator` to use disclosures; static regional tables remain default.
+
+### Cooling type WUE adjustments
+
+| Cooling | Multiplier on regional WUE |
+|---------|---------------------------|
+| evaporative | 1.0× |
+| air / dry | 0.6× |
+| liquid / immersion | 0.2× |
+| unknown | 1.0× + caveat |
+
+### Embodied water by SKU
+
+Published with citations: H100 (NVIDIA PCF + TSMC fab proxy), A100 (Bouzar et al.
+arXiv:2509.00093), V100 (Gupta et al. 2022 ICT proxy). **T4: no credible chip-level
+freshwater PCF located — field omitted when SKU unknown.**
+
+### Consumption vs withdrawal
+
+Static regional tables use `consumption` (modeled consumption-equivalent). Operator
+disclosures preserve the operator's stated accounting method without laundering
+self-reported numbers into "measured" tags.

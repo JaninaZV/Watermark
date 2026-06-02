@@ -24,7 +24,7 @@ workloads (`torch`, `transformers`, `diffusers`, `sentence-transformers`).
 
 ```bash
 pip install -e ".[dev]"
-python3 -m pytest test_schema_contract.py test_water_profile.py test_dashboard.py test_portfolio.py -q
+python3 -m pytest test_v03_trust.py test_schema_contract.py test_water_profile.py test_dashboard.py test_portfolio.py -q
 ```
 
 Optional browser-free dashboard check (requires Node.js):
@@ -62,7 +62,7 @@ definitions, source-tag enums, and versioning rules.
 
 **Run artifact (`summary.json`)**
 
-- Current version: `schema_version: "0.2"` (WWL, water accounting, seasonal stress, cooling type)
+- Current version: `schema_version: "0.3"` (measurement grades, audit pack, operator disclosures, per_unit)
 - **Minor bump** (`0.2` → `0.3`): new optional fields, new enum values, new
   caveat codes — existing parsers must keep working
 - **Major bump** (`1.0`): renamed/removed fields, changed units, changed carbon

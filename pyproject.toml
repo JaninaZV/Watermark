@@ -36,7 +36,15 @@ dev = ["pytest"]
 watermark = "watermark_meter:main"
 
 [tool.setuptools]
-py-modules = ["watermark_meter", "schema_contract"]
+py-modules = [
+    "watermark_meter",
+    "schema_contract",
+    "measurement_grade",
+    "operator_disclosures",
+    "audit_pack",
+    "compare_regions",
+    "gate",
+]
 packages = ["dashboard"]
 
 [tool.setuptools.package-data]

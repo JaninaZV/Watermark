@@ -2,7 +2,7 @@
 
 **Measure compute's water cost — direct, indirect, and watershed-weighted — with every assumption auditable.**
 
-> **Status:** v0.2 · water-first · methodology-first · public preview
+> **Status:** v0.3 · water-first · audit-ready · public preview
 
 Watermark is an open-source CLI that meters AI/compute workloads and answers a
 question most footprint tools skip: **what did this job cost in water, and was
@@ -31,10 +31,10 @@ choice costs in water.** Sweden can be 8× cleaner on carbon than Virginia but
 hydropower grids carry large indirect water footprints.
 
 ```bash
-# Hero comparison — same workload, three regions
+# Hero comparison — structured regional tradeoff (same reference energy)
+watermark compare-regions --workload embeddings \
+  --regions us-east-1 eu-north-1 us-west-2 --output comparison.json
 watermark --region us-east-1 --duration 60 --output ./run_va
-watermark --region eu-north-1 --duration 60 --output ./run_se
-watermark --region us-west-1 --duration 60 --output ./run_or
 watermark portfolio ./experiments --output portfolio.html
 ```
 
@@ -42,23 +42,27 @@ You optimized for carbon. **Did you check water?**
 
 ---
 
-## What's in scope for v0.2
+## What's in scope for v0.3
 
 - **Energy** — CPU (RAPL or utilization×TDP) + GPU (NVML / nvidia-smi)
 - **Water (primary)** — direct cooling (WUE) + indirect generation water → **WWL**
-- **Watershed stress** — WRI Aqueduct basin weighting (seasonal uplift where modeled)
+- **Confidence grades** — `measurement_grade` A/B/C with `grade_limiting_factor`
+- **Operator disclosures** — `--water-source operator` from static hyperscaler registry
+- **Audit pack** — `watermark audit-pack ./run_dir --output audit.zip`
+- **CI gate** — `watermark gate --max-wwl-ml-per-unit 500` (see `.watermark-gate.json`)
+- **Per-unit normalization** — `--token-count`, `--request-count`, `--training-steps`
+- **Watershed stress** — WRI Aqueduct + seasonal multipliers (`--water-stress-season`)
 - **Cooling type** — `--cooling-system` adjusts direct WUE (evaporative, air, liquid, immersion)
 - **Carbon (context)** — operational CO₂e; optional ElectricityMaps realtime
-- **Embodied impact** — optional amortized manufacturing water/carbon via `--hardware-sku`
-- **Comparison** — regional scenarios + portfolio with carbon vs WWL scatter
-- **Audit trail** — `summary.json`, `measurements.csv`, `dashboard.html`
+- **Embodied impact** — H100, A100, V100 SKU tables with citations (T4: no credible source yet)
+- **Comparison** — `compare-regions`, portfolio, carbon vs WWL scatter
+- **Audit trail** — `summary.json`, `measurements.csv`, `dashboard.html`, `methodology_hash`
 
 ## What's not yet supported
 
 - Direct water metering (no flow sensor — energy × coefficients, honestly labeled)
-- Live water intensity APIs (architecture seam exists; static tables default)
-- Operator disclosure ingestion pipeline
-- Per-process attribution (planned v0.3)
+- Live water intensity APIs (operator registry is the path first)
+- Per-process attribution (planned)
 
 ---
 
@@ -265,8 +269,23 @@ Workload deps (install separately): `torch`, `transformers`, `diffusers`, `sente
 
 ```bash
 pip install -e ".[dev]"
-python3 -m pytest test_dashboard.py test_portfolio.py -q   # 44 tests
+python3 -m pytest test_v03_trust.py test_schema_contract.py test_dashboard.py test_portfolio.py -q
 ```
+
+### CI integration
+
+```bash
+# Project thresholds (optional)
+cat > .watermark-gate.json <<'EOF'
+{"max_wwl_ml_per_unit": 500, "max_carbon_g_per_unit": 0.01}
+EOF
+
+watermark --region us-east-1 --duration 60 --token-count 1000 --output ./run
+watermark gate ./run --max-wwl-ml-per-unit 500
+watermark audit-pack ./run --output audit.zip
+```
+
+GitHub Actions example: see [`.github/workflows/test.yml`](./.github/workflows/test.yml).
 
 `.gitignore` excludes `venv/`, generated image folders (`**/images/`), local measurement run directories, and portfolio artifacts. Commit source code, tests, templates, and docs — not generated image binaries.
 

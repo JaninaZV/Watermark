@@ -33,6 +33,9 @@ CANONICAL_CAVEATS = [
 
 CANONICAL_SUMMARY = {
     "schema_version": RUN_SCHEMA_VERSION,
+    "measurement_grade": "C",
+    "grade_limiting_factor": "cooling_type_unknown",
+    "per_unit": None,
     "run_metadata": {
         "started_at_utc": "2026-05-30T22:36:13+00:00",
         "ended_at_utc": "2026-05-30T22:38:33+00:00",
@@ -41,6 +44,8 @@ CANONICAL_SUMMARY = {
         "host_os": "Linux",
         "rapl_platform": None,
         "scope": "host",
+        "workload_type": "inference",
+        "methodology_hash": "sha256:placeholder",
     },
     "measured_sources": {
         "cpu": ["modeled_from_util"],
@@ -78,13 +83,16 @@ CANONICAL_SUMMARY = {
         "wwl_l": 0.046362,
         "wwl_ml": 46.362,
         "wwl_per_unit_ml": None,
-        "water_accounting_method": "unknown",
+        "water_accounting_method": "consumption",
         "water_source": "static_avg",
         "weighting_methodology": "multiplier_1_plus_score, see methodology",
+        "gpu_water_fraction": None,
+        "gpu_water_attribution_method": "unknown",
     },
     "embodied": {
         "co2e_kg": 0.0,
         "water_l": 0.0,
+        "embodied_water_ml": None,
         "sku": None,
         "useful_life_hours": None,
         "source": "no_profile",
@@ -118,8 +126,8 @@ CANONICAL_SUMMARY = {
         "grid_co2_kg_per_kwh": 0.35,
         "grid_water_l_per_kwh": 1.9,
         "water_source": "static",
-        "water_accounting_method": "unknown",
-        "water_stress_season": "spring",
+        "water_accounting_method": "consumption",
+        "water_stress_season": "annual",
         "water_stress_as_of": "2026-05-30T22:36:13Z",
         "cooling_type": "unknown",
         "carbon_energy_basis": "facility_kwh",

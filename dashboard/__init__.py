@@ -468,6 +468,8 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
     direct_ml = w["direct_cooling_l"] * 1000
     indirect_ml = w["indirect_generation_l"] * 1000
     wwl_per_unit_ml = w.get("wwl_per_unit_ml")
+    gpu_water_fraction = w.get("gpu_water_fraction")
+    measurement_grade = summary.get("measurement_grade")
 
     embodied = summary.get("embodied", {})
     lifecycle = summary.get("lifecycle", {})
@@ -521,7 +523,7 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
     })
 
     return {
-        "schema_version": "0.2",
+        "schema_version": "0.3",
         "run": {
             "id": run_id,
             "region": a["region"],
@@ -576,6 +578,8 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
             "has_embodied": has_embodied,
             "stress_basin": w.get("stress_basin"),
             "stress_level": w.get("stress_level"),
+            "measurement_grade": measurement_grade,
+            "gpu_water_fraction": gpu_water_fraction,
         },
         "embodied": embodied,
         "lifecycle": lifecycle,
@@ -649,6 +653,10 @@ def build_dashboard_payload(summary: dict, samples: list[dict],
                 f"Stress: {w.get('stress_level', 'n/a')} basin {w.get('stress_basin', 'n/a')} "
                 f"({w.get('stress_source', 'wri_aqueduct_2023')}). "
                 f"Indirect: NREL Macknick 2012 + USGS 2020."
+                + (
+                    f" GPU drove {gpu_water_fraction * 100:.0f}% of facility water this run."
+                    if gpu_water_fraction is not None else ""
+                )
             ),
             "embodied": (
                 f"Embodied {embodied.get('label') or embodied.get('sku') or 'hardware'} "

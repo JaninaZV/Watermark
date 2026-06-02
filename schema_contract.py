@@ -5,9 +5,14 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-RUN_SCHEMA_VERSION = "0.2"
+RUN_SCHEMA_VERSION = "0.3"
 PORTFOLIO_SCHEMA_VERSION = "0.1-portfolio"
 DEFAULT_RUN_SCHEMA_VERSION = "0.1"
+
+MEASUREMENT_GRADES = frozenset({"A", "B", "C"})
+WATER_ACCOUNTING_METHODS = frozenset({"consumption", "withdrawal", "unknown"})
+WORKLOAD_TYPES = frozenset({"training", "inference", "benchmark", "unknown"})
+PER_UNIT_TYPES = frozenset({"token", "image", "request", "training_step"})
 
 WATER_BOUNDARIES = frozenset({"facility", "grid", "region"})
 CAVEAT_SEVERITIES = frozenset({"info", "warning", "error"})
@@ -145,6 +150,27 @@ def validate_run_summary(
                 allow_legacy_strings=allow_legacy_caveats,
             )
         )
+
+    version, _missing = resolve_run_schema_version(summary)
+    if version == RUN_SCHEMA_VERSION or summary.get("schema_version") == RUN_SCHEMA_VERSION:
+        grade = summary.get("measurement_grade")
+        if grade not in MEASUREMENT_GRADES:
+            errors.append(f"measurement_grade must be one of {sorted(MEASUREMENT_GRADES)}")
+        limiting = summary.get("grade_limiting_factor")
+        if grade in ("B", "C") and not limiting:
+            errors.append("grade_limiting_factor required when measurement_grade is B or C")
+        wt = summary.get("run_metadata", {}).get("workload_type")
+        if wt not in WORKLOAD_TYPES:
+            errors.append(f"run_metadata.workload_type must be one of {sorted(WORKLOAD_TYPES)}")
+        acct = summary.get("water", {}).get("water_accounting_method")
+        if acct not in WATER_ACCOUNTING_METHODS:
+            errors.append(f"water.water_accounting_method must be one of {sorted(WATER_ACCOUNTING_METHODS)}")
+        per_unit = summary.get("per_unit")
+        if per_unit is not None:
+            if per_unit.get("unit_type") not in PER_UNIT_TYPES:
+                errors.append("per_unit.unit_type invalid")
+            if not isinstance(per_unit.get("unit_count"), int) or per_unit["unit_count"] <= 0:
+                errors.append("per_unit.unit_count must be positive integer")
 
     return errors
 

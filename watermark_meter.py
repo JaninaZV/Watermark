@@ -68,16 +68,17 @@ DEFAULT_WUE_DIRECT = 0.15  # AWS global WUE 2024 (sustainability.aboutamazon.com
 STRESS_SOURCE_DEFAULT = "wri_aqueduct_2023"
 WATER_STRESS_WEIGHTING_METHOD = "multiplier_1_plus_score, see methodology"
 WATER_SOURCE_STATIC = "static_avg"
+WATER_SOURCE_OPERATOR = "operator_disclosure"
 WATER_ACCOUNTING_UNKNOWN = "unknown"
 WATER_ACCOUNTING_CONSUMPTION = "consumption"
 WATER_ACCOUNTING_WITHDRAWAL = "withdrawal"
 
 COOLING_WUE_MULTIPLIERS = {
     "evaporative": 1.0,
-    "air": 0.35,
-    "dry": 0.35,
-    "liquid": 0.10,
-    "immersion": 0.08,
+    "air": 0.6,
+    "dry": 0.6,
+    "liquid": 0.2,
+    "immersion": 0.2,
     "unknown": 1.0,
 }
 
@@ -403,6 +404,15 @@ HARDWARE_PROFILES = {
         "useful_life_hours": GPU_USEFUL_LIFE_HOURS,
         "citation": "Bouzar et al. arXiv:2509.00093 cradle-to-gate A100 LCA",
     },
+    # V100: no chip-level freshwater PCF in vendor docs; ICT manufacturing midpoint from
+    #   Gupta et al. "Chasing Carbon" (2022) scaled to Volta-era fab intensity.
+    "v100": {
+        "label": "NVIDIA V100 SXM",
+        "embodied_co2e_kg": 72.0,
+        "embodied_water_l": 1800.0,
+        "useful_life_hours": GPU_USEFUL_LIFE_HOURS,
+        "citation": "Gupta et al. 2022 ICT hardware manufacturing water proxy (Volta-class)",
+    },
     # Dell PowerEdge-class 2U rack server — cradle-to-gate manufacturing share.
     #   Dell PowerEdge R640 PAIA PCF ~7,730 kg CO2e lifetime (Jan 2019); manufacturing
     #   ~10-12% of total ≈ 850 kg CO2e cradle-to-gate for CPU/RAM/mainboard assembly.
@@ -430,6 +440,7 @@ HARDWARE_PROFILES = {
 _HARDWARE_SKU_ALIASES: dict[str, tuple[str, ...]] = {
     "h100-sxm": ("h100 sxm", "h100-sxm", "hgx h100", "h100 80gb", "h100"),
     "a100": ("a100 sxm", "a100 80gb", "a100 40gb", "a100"),
+    "v100": ("v100 sxm", "v100 32gb", "v100"),
     "generic-2u": ("generic-2u", "generic 2u", "poweredge", "proliant", "2u server", "rack server"),
 }
 
@@ -476,6 +487,7 @@ def compute_embodied_impacts(
         return {
             "co2e_kg": 0.0,
             "water_l": 0.0,
+            "embodied_water_ml": None,
             "sku": sku_display,
             "useful_life_hours": None,
             "source": "no_profile",
@@ -487,9 +499,11 @@ def compute_embodied_impacts(
     duration_h = max(duration_s, 0.0) / 3600.0
     life_h = profile["useful_life_hours"]
     share = duration_h / life_h if life_h > 0 else 0.0
+    water_l = round(profile["embodied_water_l"] * share, 8)
     return {
         "co2e_kg": round(profile["embodied_co2e_kg"] * share, 8),
-        "water_l": round(profile["embodied_water_l"] * share, 8),
+        "water_l": water_l,
+        "embodied_water_ml": round(water_l * 1000, 4),
         "sku": hardware_sku,
         "useful_life_hours": life_h,
         "source": "modeled",
@@ -525,6 +539,16 @@ def _warn_em_key_if_static(grid_source: str) -> None:
         _grid_warn(
             "ELECTRICITYMAPS_API_KEY detected; pass --grid-source electricitymaps "
             "to use realtime carbon"
+        )
+
+
+def _warn_operator_disclosure_if_static(region: str, water_source: str) -> None:
+    if water_source != "static":
+        return
+    from operator_disclosures import regions_with_disclosures
+    if region in regions_with_disclosures():
+        _grid_warn(
+            f"Operator disclosure available for {region}; pass --water-source operator to use it"
         )
 
 
@@ -760,7 +784,7 @@ def static_water_profile(
         raise ValueError(f"Unknown region: {region}")
     base = REGION_PROFILES[region]
     cooling = normalize_cooling_type(cooling_type)
-    season = water_stress_season or season_from_datetime(at)
+    season = water_stress_season or "annual"
     if season not in DEFAULT_SEASONAL_STRESS_MULTIPLIERS:
         season = "annual"
 
@@ -784,8 +808,53 @@ def static_water_profile(
         "stress_source": base.get("stress_source", STRESS_SOURCE_DEFAULT),
         "water_stress_season": season,
         "water_stress_as_of": _format_em_datetime(at),
-        "accounting_method": WATER_ACCOUNTING_UNKNOWN,
+        "accounting_method": WATER_ACCOUNTING_CONSUMPTION,
         "water_source": WATER_SOURCE_STATIC,
+        "cooling_type": cooling,
+    }
+
+
+def operator_water_profile(
+    region: str,
+    at: dt.datetime,
+    *,
+    cooling_type: str = "unknown",
+    wue_direct_override: float | None = None,
+    water_stress_season: str | None = None,
+) -> dict:
+    from operator_disclosures import get_operator_disclosure
+
+    disclosure = get_operator_disclosure(region)
+    if disclosure is None:
+        raise ValueError(f"No operator disclosure for region: {region}")
+
+    base = static_water_profile(
+        region,
+        at,
+        cooling_type=cooling_type,
+        wue_direct_override=wue_direct_override,
+        water_stress_season=water_stress_season,
+    )
+    regional_wue = disclosure["wue_l_per_kwh"]
+    cooling = normalize_cooling_type(cooling_type)
+    wue = (
+        wue_direct_override
+        if wue_direct_override is not None
+        else regional_wue * COOLING_WUE_MULTIPLIERS.get(cooling, 1.0)
+    )
+    return {
+        **base,
+        "wue_direct_l_per_kwh": wue,
+        "wue_regional_base_l_per_kwh": regional_wue,
+        "wue_source": disclosure["disclosure_source"],
+        "accounting_method": disclosure["accounting_method"],
+        "water_source": WATER_SOURCE_OPERATOR,
+        "operator": disclosure["operator"],
+        "operator_disclosure_source": disclosure["disclosure_source"],
+        "disclosure_type": disclosure["disclosure_type"],
+        "disclosure_verified": disclosure["disclosure_verified"],
+        "disclosure_year": disclosure["disclosure_year"],
+        "disclosure_notes": disclosure.get("notes"),
         "cooling_type": cooling,
     }
 
@@ -803,7 +872,7 @@ def fetch_water_profile(
     Load water profile for direct/indirect modeling.
 
     static: regional WUE + Aqueduct stress tables (default, offline)
-    operator: reserved for facility-reported disclosures (not implemented)
+    operator: facility-reported WUE from disclosure registry
     """
     if region not in REGION_PROFILES:
         raise ValueError(f"Unknown region: {region}")
@@ -831,7 +900,13 @@ def fetch_water_profile(
             water_stress_season=water_stress_season,
         )
     elif water_source == "operator":
-        raise NotImplementedError("operator water disclosures are not implemented in v0.2")
+        profile = operator_water_profile(
+            region,
+            at,
+            cooling_type=cooling_type,
+            wue_direct_override=wue_direct_override,
+            water_stress_season=water_stress_season,
+        )
     else:
         raise ValueError(f"Unknown water_source: {water_source}")
 
@@ -1111,6 +1186,51 @@ def model_cpu_watts_from_util(cpu_percent: float, cpu_tdp_w: float = 65.0,
 
 
 # ---------------------------------------------------------------------------
+# Workload typing and per-unit normalization
+# ---------------------------------------------------------------------------
+
+def infer_workload_type(
+    *,
+    training_steps: int | None = None,
+    token_count: int | None = None,
+    request_count: int | None = None,
+    image_count: int | None = None,
+    workload_name: str | None = None,
+    explicit: str | None = None,
+) -> str:
+    if explicit in ("training", "inference", "benchmark", "unknown"):
+        return explicit
+    text = (workload_name or "").lower()
+    if training_steps or "train" in text:
+        return "training"
+    if token_count or request_count or image_count:
+        return "inference"
+    if "benchmark" in text:
+        return "benchmark"
+    return "unknown"
+
+
+def build_per_unit_block(
+    impacts: dict,
+    *,
+    unit_type: str | None,
+    unit_count: int | None,
+    facility_wh: float,
+) -> dict | None:
+    if not unit_type or not unit_count or unit_count <= 0:
+        return None
+    wwl_ml = impacts["water"]["wwl_ml"]
+    carbon_g = impacts["carbon"]["co2e_kg"] * 1000
+    return {
+        "unit_type": unit_type,
+        "unit_count": unit_count,
+        "wwl_ml_per_unit": round(wwl_ml / unit_count, 6),
+        "energy_wh_per_unit": round(facility_wh / unit_count, 6),
+        "carbon_g_per_unit": round(carbon_g / unit_count, 6),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Meter
 # ---------------------------------------------------------------------------
 
@@ -1120,7 +1240,12 @@ class Meter:
                  wue_source=None, grid_source="static", water_source="static",
                  cooling_type: str | None = None,
                  hardware_sku: str | None = None, hardware_sku_requested: str | None = None,
-                 image_count: int | None = None):
+                 image_count: int | None = None,
+                 token_count: int | None = None,
+                 request_count: int | None = None,
+                 training_steps: int | None = None,
+                 workload_type: str | None = None,
+                 water_stress_season: str | None = None):
         if scope != "host":
             raise NotImplementedError("per-process attribution is v0.3 (eBPF/Kepler)")
         if scope_pid is not None:
@@ -1131,6 +1256,11 @@ class Meter:
         self.water_source = water_source
         self.cooling_type = normalize_cooling_type(cooling_type)
         self.image_count = image_count
+        self.token_count = token_count
+        self.request_count = request_count
+        self.training_steps = training_steps
+        self.workload_type = workload_type
+        self.water_stress_season = water_stress_season
         self.run_at = dt.datetime.now(dt.timezone.utc)
         self.profile = fetch_grid_profile(
             region,
@@ -1144,6 +1274,7 @@ class Meter:
             water_source=water_source,
             cooling_type=self.cooling_type,
             wue_direct_override=wue_override,
+            water_stress_season=self.water_stress_season,
         )
         self.pue = pue
         self.pue_source = pue_source
@@ -1163,6 +1294,7 @@ class Meter:
 
         self.rapl = RAPLProbe()
         self.nvml = NVMLProbe()
+        self.rapl_available_at_start = self.rapl.available
         if self.rapl.available:
             self.rapl.read_watts(self.interval_s)
 
@@ -1250,7 +1382,7 @@ class Meter:
 
         it_kwh = (total_cpu_wh + total_gpu_wh) / 1000.0
         facility_kwh = it_kwh * self.pue
-        wwl_per_unit = None
+        facility_wh = facility_kwh * 1000
         impacts = compute_impacts(
             it_kwh,
             facility_kwh,
@@ -1258,9 +1390,27 @@ class Meter:
             self.water_profile,
             wue_direct=self.wue_direct,
         )
-        if self.image_count and self.image_count > 0:
-            wwl_per_unit = impacts["water"]["wwl_l"] / self.image_count
-            impacts["water"]["wwl_per_unit_ml"] = round(wwl_per_unit * 1000, 4)
+
+        unit_type = None
+        unit_count = None
+        if self.training_steps and self.training_steps > 0:
+            unit_type, unit_count = "training_step", self.training_steps
+        elif self.token_count and self.token_count > 0:
+            unit_type, unit_count = "token", self.token_count
+        elif self.request_count and self.request_count > 0:
+            unit_type, unit_count = "request", self.request_count
+        elif self.image_count and self.image_count > 0:
+            unit_type, unit_count = "image", self.image_count
+
+        per_unit = build_per_unit_block(
+            impacts,
+            unit_type=unit_type,
+            unit_count=unit_count,
+            facility_wh=facility_wh,
+        )
+        if per_unit:
+            impacts["water"]["wwl_per_unit_ml"] = per_unit["wwl_ml_per_unit"]
+
         duration_s = round(sum(s.get("elapsed_s", s["interval_s"]) for s in self.samples), 3)
         embodied = compute_embodied_impacts(
             duration_s, self.hardware_sku, self.hardware_sku_requested,
@@ -1270,7 +1420,26 @@ class Meter:
         gpu_sources = sorted({s["gpu_source"] for s in self.samples if s["gpu_watts"] is not None})
         cpu_modeled = sum(1 for s in self.samples if s["cpu_source"] == "modeled_from_util")
 
+        gpu_measured = any(s["gpu_watts"] is not None for s in self.samples)
+        gpu_water_fraction = None
+        gpu_water_attribution_method = "unknown"
+        if gpu_measured and (total_cpu_wh + total_gpu_wh) > 0:
+            gpu_water_fraction = round(total_gpu_wh / (total_cpu_wh + total_gpu_wh), 4)
+            gpu_water_attribution_method = "energy_proportional"
+
+        from audit_pack import methodology_hash
+        from measurement_grade import compute_measurement_grade, grade_caveat
         from schema_contract import make_caveat
+
+        resolved_workload_type = infer_workload_type(
+            training_steps=self.training_steps,
+            token_count=self.token_count,
+            request_count=self.request_count,
+            image_count=self.image_count,
+            explicit=self.workload_type,
+        )
+
+        meth_hash = methodology_hash()
 
         caveats = [
             make_caveat(
@@ -1289,13 +1458,7 @@ class Meter:
                 "info",
                 "Water values combine direct cooling (WUE, vendor-published) and indirect generation water "
                 "(NREL Macknick et al. 2012 + USGS 2020). Both are annual averages. "
-                "Watermark reports modeled consumption-equivalent volumes, not operator withdrawal meters.",
-            ),
-            make_caveat(
-                "water_accounting_unknown",
-                "warning",
-                "water_accounting_method is unknown — modeled totals may overstate or understate "
-                "facility impact vs operator withdrawal or consumption disclosures.",
+                "Watermark reports modeled consumption-equivalent volumes unless operator withdrawal is declared.",
             ),
             make_caveat(
                 "watershed_stress_weighting",
@@ -1315,6 +1478,28 @@ class Meter:
                 "package counters include the integrated memory controller.",
             ),
         ]
+        accounting_method = impacts["water"]["water_accounting_method"]
+        if accounting_method == WATER_ACCOUNTING_UNKNOWN:
+            caveats.append(make_caveat(
+                "water_accounting_unknown",
+                "warning",
+                "water_accounting_method is unknown — modeled totals may overstate or understate "
+                "facility impact vs operator withdrawal or consumption disclosures.",
+            ))
+        if accounting_method == WATER_ACCOUNTING_WITHDRAWAL:
+            caveats.append(make_caveat(
+                "water_withdrawal_not_consumption",
+                "warning",
+                "Operator disclosure uses withdrawal accounting — withdrawal ≠ consumption; "
+                "actual consumed water may be lower (especially with evaporative cooling).",
+            ))
+        if self.water_source == "operator":
+            caveats.append(make_caveat(
+                "operator_disclosure_self_reported",
+                "warning",
+                "Direct WUE from operator self-reported disclosure (disclosure_verified=false unless "
+                "independently verified). Not a flow meter reading.",
+            ))
         if self.cooling_type == "unknown":
             caveats.append(make_caveat(
                 "cooling_type_unknown",
@@ -1323,11 +1508,20 @@ class Meter:
                 "adjustment. Pass --cooling-system (evaporative, air, liquid, immersion) when known.",
             ))
         if self.water_profile.get("water_stress_season") == "annual":
-            caveats.append(make_caveat(
-                "water_stress_season_annual",
-                "info",
-                "Basin stress uses annual Aqueduct averages; drought-prone regions vary significantly by season.",
-            ))
+            base_stress = float(REGION_PROFILES.get(self.region, {}).get("water_stress_score", 0.0))
+            if base_stress > 0.6:
+                caveats.append(make_caveat(
+                    "water_stress_annual_high_basin",
+                    "warning",
+                    "Annual average stress may understate peak-season impact in this drought-prone basin "
+                    f"(baseline score {base_stress:.2f}). Use --water-stress-season summer for peak analysis.",
+                ))
+            else:
+                caveats.append(make_caveat(
+                    "water_stress_season_annual",
+                    "info",
+                    "Basin stress uses annual Aqueduct averages; drought-prone regions vary significantly by season.",
+                ))
         elif self.water_profile.get("water_stress_season") in ("summer", "fall"):
             caveats.append(make_caveat(
                 "water_stress_seasonal",
@@ -1387,8 +1581,36 @@ class Meter:
                 "for publishable results.",
             ))
 
+        draft_summary = {
+            "run_metadata": {"samples": len(self.samples)},
+            "measured_sources": {
+                "cpu": cpu_sources,
+                "gpu": gpu_sources if gpu_sources else ["no_gpu"],
+                "cpu_rapl_samples": sum(1 for s in self.samples if s["cpu_source"] == "rapl_measured"),
+                "cpu_modeled_samples": cpu_modeled,
+                "gpu_missing_samples": sum(1 for s in self.samples if s["gpu_watts"] is None),
+            },
+            "assumptions": {
+                "region": self.region,
+                "cooling_type": self.cooling_type,
+                "pue_source": self.pue_source,
+                "wue_source": self.wue_source,
+            },
+            "water": {"water_accounting_method": accounting_method},
+        }
+        measurement_grade, grade_limiting_factor = compute_measurement_grade(
+            draft_summary,
+            rapl_available_at_start=self.rapl_available_at_start,
+        )
+        grade_cv = grade_caveat(measurement_grade, grade_limiting_factor)
+        if grade_cv:
+            caveats.append(grade_cv)
+
         return {
-            "schema_version": "0.2",
+            "schema_version": "0.3",
+            "measurement_grade": measurement_grade,
+            "grade_limiting_factor": grade_limiting_factor,
+            "per_unit": per_unit,
             "run_metadata": {
                 "started_at_utc": self.samples[0]["timestamp"],
                 "ended_at_utc": self.samples[-1]["timestamp"],
@@ -1397,6 +1619,8 @@ class Meter:
                 "host_os": platform.platform(),
                 "rapl_platform": self.rapl.platform,
                 "scope": self.scope,
+                "workload_type": resolved_workload_type,
+                "methodology_hash": meth_hash,
             },
             "measured_sources": {
                 "cpu": cpu_sources,
@@ -1437,10 +1661,13 @@ class Meter:
                 "water_accounting_method": impacts["water"]["water_accounting_method"],
                 "water_source": impacts["water"]["water_source"],
                 "weighting_methodology": impacts["water"]["weighting_methodology"],
+                "gpu_water_fraction": gpu_water_fraction,
+                "gpu_water_attribution_method": gpu_water_attribution_method,
             },
             "embodied": {
                 "co2e_kg": embodied["co2e_kg"],
                 "water_l": embodied["water_l"],
+                "embodied_water_ml": embodied.get("embodied_water_ml"),
                 "sku": embodied["sku"],
                 "useful_life_hours": embodied["useful_life_hours"],
                 "source": embodied["source"],
@@ -1478,6 +1705,10 @@ class Meter:
                 "water_stress_season": self.water_profile.get("water_stress_season"),
                 "water_stress_as_of": self.water_profile.get("water_stress_as_of"),
                 "cooling_type": self.cooling_type,
+                "operator_disclosure_source": self.water_profile.get("operator_disclosure_source"),
+                "disclosure_verified": self.water_profile.get("disclosure_verified"),
+                "disclosure_type": self.water_profile.get("disclosure_type"),
+                "disclosure_year": self.water_profile.get("disclosure_year"),
                 "carbon_energy_basis": "facility_kwh",
                 "carbon_rationale": "Scope 2: grid intensity applied to total facility electricity (IT × PUE).",
                 "cpu_tdp_fallback_w": self.cpu_tdp_fallback,
@@ -1622,10 +1853,10 @@ def parse_args():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Hero comparison — same workload, three regions (carbon/water inversion):\n"
+            "Hero comparison — structured regional tradeoff:\n"
+            "  watermark compare-regions --workload embeddings "
+            "--regions us-east-1 eu-north-1 us-west-2 --output comparison.json\n"
             "  watermark --region us-east-1 --output ./run_va --duration 60\n"
-            "  watermark --region eu-north-1 --output ./run_se --duration 60\n"
-            "  watermark --region us-west-1 --output ./run_or --duration 60\n"
             "  watermark portfolio ./experiments --output portfolio.html\n"
             "You optimized for carbon. Did you check water?"
         ),
@@ -1649,6 +1880,15 @@ def parse_args():
     p.add_argument("--grid-source", default="static", choices=["static", "electricitymaps"],
                    dest="grid_source",
                    help="Grid carbon intensity source: static regional table (default) or ElectricityMaps API.")
+    p.add_argument("--water-source", default="static", choices=["static", "operator"],
+                   dest="water_source",
+                   help="Water profile source: static regional tables (default) or operator disclosures.")
+    p.add_argument("--water-stress-season", default=None, dest="water_stress_season",
+                   choices=["annual", "winter", "spring", "summer", "fall"],
+                   help="Season for basin stress multiplier (default: annual).")
+    p.add_argument("--workload-type", default=None, dest="workload_type",
+                   choices=["training", "inference", "benchmark", "unknown"],
+                   help="Declare workload type for portfolio normalization guards.")
     p.add_argument("--dashboard", action="store_true",
                    help="Write dashboard.html (also auto-enabled with --run-id or --image-count).")
     p.add_argument("--no-dashboard", action="store_true",
@@ -1659,6 +1899,12 @@ def parse_args():
                    help="Workload label for the dashboard, e.g. 'SDXL · 100 imgs'.")
     p.add_argument("--image-count", type=int, default=None,
                    help="Number of images/units for per-item footprint on the dashboard.")
+    p.add_argument("--token-count", type=int, default=None, dest="token_count",
+                   help="Token count for per-token WWL/energy/carbon normalization.")
+    p.add_argument("--request-count", type=int, default=None, dest="request_count",
+                   help="Request count for per-request normalization.")
+    p.add_argument("--training-steps", type=int, default=None, dest="training_steps",
+                   help="Training steps for per-step normalization (training workloads).")
     p.add_argument("--hardware", default=None,
                    help="Hardware label for the dashboard sidebar, e.g. 'H100 SXM 80GB'.")
     p.add_argument("--hardware-sku", default=None, dest="hardware_sku",
@@ -1704,6 +1950,12 @@ def parse_args():
         p.error("--duration must be > 0")
     if args.image_count is not None and args.image_count <= 0:
         p.error("--image-count must be > 0")
+    if args.token_count is not None and args.token_count <= 0:
+        p.error("--token-count must be > 0")
+    if args.request_count is not None and args.request_count <= 0:
+        p.error("--request-count must be > 0")
+    if args.training_steps is not None and args.training_steps <= 0:
+        p.error("--training-steps must be > 0")
     if args.compute_rate is not None and args.compute_rate < 0:
         p.error("--compute-rate must be >= 0")
 
@@ -1713,12 +1965,24 @@ def parse_args():
 
 
 def main():
-    if len(sys.argv) > 1 and sys.argv[1] == "portfolio":
-        from dashboard.portfolio import portfolio_cli_main
-        raise SystemExit(portfolio_cli_main(sys.argv[2:]))
+    if len(sys.argv) > 1:
+        sub = sys.argv[1]
+        if sub == "portfolio":
+            from dashboard.portfolio import portfolio_cli_main
+            raise SystemExit(portfolio_cli_main(sys.argv[2:]))
+        if sub == "audit-pack":
+            from audit_pack import audit_pack_cli_main
+            raise SystemExit(audit_pack_cli_main(sys.argv[2:]))
+        if sub == "compare-regions":
+            from compare_regions import compare_regions_cli_main
+            raise SystemExit(compare_regions_cli_main(sys.argv[2:]))
+        if sub == "gate":
+            from gate import gate_cli_main
+            raise SystemExit(gate_cli_main(sys.argv[2:]))
 
     args = parse_args()
     _warn_em_key_if_static(args.grid_source)
+    _warn_operator_disclosure_if_static(args.region, args.water_source)
 
     cmd = list(args.command)
     if cmd and cmd[0] == "--":
@@ -1749,10 +2013,16 @@ def main():
         pue_source=args.pue_source,
         wue_source=args.wue_source,
         grid_source=args.grid_source,
+        water_source=args.water_source,
         cooling_type=args.cooling_system,
         hardware_sku=sku_resolved,
         hardware_sku_requested=sku_requested,
         image_count=args.image_count,
+        token_count=args.token_count,
+        request_count=args.request_count,
+        training_steps=args.training_steps,
+        workload_type=args.workload_type,
+        water_stress_season=args.water_stress_season,
     )
 
     cpu_hint = "rapl_measured" if meter.rapl.available else "modeled_from_util"
@@ -1760,6 +2030,7 @@ def main():
     carbon_hint = meter.profile.get("carbon_source", CARBON_SOURCE_STATIC)
     print(f"[watermark] region:       {args.region} ({REGION_PROFILES[args.region]['label']})")
     print(f"[watermark] grid source:  {args.grid_source} (carbon: {carbon_hint})")
+    print(f"[watermark] water source: {args.water_source}")
     print(f"[watermark] cpu source:   {cpu_hint}" +
           (f" ({meter.rapl.platform})" if meter.rapl.platform else ""))
     print(f"[watermark] gpu source:   {gpu_hint}")
@@ -1836,6 +2107,8 @@ def main():
         w = summary["water"]
         wwl_ml = w.get("wwl_ml", w.get("stress_weighted_total_l", 0) * 1000)
         print(f"[watermark] WWL:          {wwl_ml:.1f} mL (watershed-weighted water)")
+        print(f"[watermark] grade:        {summary.get('measurement_grade', '?')}"
+              + (f" ({summary.get('grade_limiting_factor')})" if summary.get('grade_limiting_factor') else ""))
         print(f"[watermark] carbon:       {summary['carbon']['co2e_kg'] * 1000:.2f} g CO₂e")
         print(
             "[watermark] tip: compare us-east-1, eu-north-1, us-west-1 — "
